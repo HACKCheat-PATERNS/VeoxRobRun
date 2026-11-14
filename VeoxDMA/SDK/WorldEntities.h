@@ -47,6 +47,8 @@ struct Entity {
     std::string label;
     int cashAmount = 0;
     bool hasCashAmount = false;
+    int dirtyCash = 0;
+    int cleanCash = 0;
     float yaw = 0.f;
     bool hasYaw = false;
 };

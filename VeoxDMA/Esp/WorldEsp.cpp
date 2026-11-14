@@ -191,6 +191,9 @@ void DrawWorldEntities()
 		std::string label = entity.label;
 		if (entity.hasCashAmount) {
 			label += " | $" + FormatCash(entity.cashAmount);
+			if (entity.kind == RobRunWorld::Kind::MoneyWorkbench && entity.cleanCash > 0 && entity.dirtyCash > 0) {
+				label += " (C:$" + FormatCash(entity.cleanCash) + " D:$" + FormatCash(entity.dirtyCash) + ")";
+			}
 		} else if (entity.kind == RobRunWorld::Kind::Container &&
 			ConfigInstance.World.ShowEmpty && entity.hasEmptyFlag) {
 			label += entity.empty ? " [empty]" : " [loot]";
