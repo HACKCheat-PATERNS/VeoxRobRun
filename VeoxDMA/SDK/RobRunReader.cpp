@@ -648,9 +648,10 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     g_workerThread = std::thread([] {
         while (!g_workerStop.load(std::memory_order_relaxed)) {
             Update();
-            // Small fixed pause so a healthy pass runs at ~30 Hz while a slow
-            // one simply runs slower instead of blocking the render thread.
-            for (int i = 0; i < 10 && !g_workerStop.load(std::memory_order_relaxed); ++i)
+            // Adaptive sleep: 1 ms when entities are active to keep snapshots fresh (50-60 Hz),
+            // or 10 ms during empty lobbies / scene transitions.
+            const int sleepMs = (cachedBattleModel > 0x10000 && !entities.empty()) ? 1 : 10;
+            for (int i = 0; i < sleepMs && !g_workerStop.load(std::memory_order_relaxed); ++i)
                 Sleep(1);
         }
     });
@@ -2439,10 +2440,10 @@ static void UpdateInternal()
                     rig.prevLocal.swap(rig.curLocal);
                     rig.prevLocalValid = true;
 
-                    // Vehicles move fast: smoothing world coordinates creates a lagging trailing skeleton.
-                    // Bypass exponential smoothing when inside a vehicle or moving fast (> 0.4m / pass).
+                    // Vehicles & moving players: bypass exponential smoothing when moving (> 0.05m / pass, ~1.5 m/s)
+                    // so the skeleton never trails behind running models. Stationary players retain smoothing to damp DMA jitter.
                     const bool isFastMoving = entity.inVehicle ||
-                        (Distance(rig.lastSampledPos, entity.position) > 0.4f);
+                        (Distance(rig.lastSampledPos, entity.position) > 0.05f);
                     rig.lastSampledPos = entity.position;
 
                     // Exponential smoothing on the worker. PoseSmoothAlpha is

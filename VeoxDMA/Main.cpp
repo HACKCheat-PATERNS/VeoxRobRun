@@ -92,6 +92,7 @@ static void TickOverlay()
 {
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
 	Aim::SetDisplaySize(display.x, display.y);
+	RobRunReader::RefreshCamera();
 
 	if (g_pendingAttachToast.exchange(false))
 		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f);
