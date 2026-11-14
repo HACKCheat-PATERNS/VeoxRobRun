@@ -4,7 +4,6 @@
 #include "RobRunMemory.h"
 #include "Il2Cpp.h"
 #include "Memory.h"
-#include "money_tables.hpp"
 #include <cmath>
 #include <functional>
 #include <unordered_map>
@@ -460,7 +459,7 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
     AddDictionaryDescriptionScatter(world, rr::WorldEntitiesModel::Shelvings, Kind::Shelving,
         rr::ShelvingModel::DescriptionModel, rr::ShelvingModel::DescriptionPosition, out, out.containers);
 
-    // CollectionTables — robust traversal via ported money_tables module
+    // CollectionTables
     {
         std::vector<RobRunMemory::DictEntry> entries;
         if (ReadCollection(world, rr::WorldEntitiesModel::CollectionTables, entries)) {
@@ -468,18 +467,45 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
                 const std::uintptr_t model = entry.value;
                 if (model <= 0x10000) continue;
 
-                rob_run::TableRecord record{};
-                if (!rob_run::ReadCollectionTable(model, record) || !ValidPosition(record.position))
+                const std::uintptr_t descModel = RobRunMemory::ReadPtr(
+                    model + rr::CollectionTableModel::DescriptionModel);
+                const std::uintptr_t locDesc = descModel > 0x10000
+                    ? RobRunMemory::ReadPtr(descModel + rr::CollectionTableModel::DescValue) : 0;
+                if (locDesc <= 0x10000) continue;
+
+                Vector3 position{};
+                if (!RobRunMemory::ReadVector3(locDesc + rr::CollectionTableModel::Position, position) ||
+                    !ValidPosition(position))
                     continue;
+
+                const float yaw = RobRunMemory::ReadFloat(
+                    locDesc + rr::CollectionTableModel::Orientation + 0x04);
+                const bool hasYaw = std::isfinite(yaw) && yaw != 0.f;
+
+                int cash = 0;
+                const std::uintptr_t rewardModel = RobRunMemory::ReadPtr(
+                    model + rr::CollectionTableModel::RewardModel);
+                if (rewardModel > 0x10000) {
+                    const std::uintptr_t rewardData = RobRunMemory::ReadPtr(rewardModel + 0x10);
+                    if (rewardData > 0x10000) {
+                        for (std::uintptr_t off : { (std::uintptr_t)0x18, (std::uintptr_t)0x20 }) {
+                            const std::uintptr_t cashData = RobRunMemory::ReadPtr(rewardData + off);
+                            if (cashData > 0x10000) {
+                                int val = RobRunMemory::ReadInt32(cashData + rr::CashAmountData::Value);
+                                if (val > 0 && val < 100000000) { cash = val; break; }
+                            }
+                        }
+                    }
+                }
 
                 Entity entity{};
                 entity.id = entry.key;
                 entity.kind = Kind::CollectionTable;
-                entity.position = record.position;
-                entity.cashAmount = record.total_cash;
-                entity.hasCashAmount = (record.total_cash > 0);
-                entity.yaw = record.yaw;
-                entity.hasYaw = std::isfinite(record.yaw) && record.yaw != 0.f;
+                entity.position = position;
+                entity.cashAmount = cash;
+                entity.hasCashAmount = (cash > 0);
+                entity.yaw = yaw;
+                entity.hasYaw = hasYaw;
                 entity.label = "Collection Table";
                 out.entities.push_back(std::move(entity));
                 ++out.containers;
@@ -627,7 +653,7 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
         }
     }
 
-    // MoneyWorkbenches — robust traversal via ported money_tables module (clean + dirty amounts)
+    // MoneyWorkbenches
     {
         std::vector<RobRunMemory::DictEntry> entries;
         if (ReadCollection(world, rr::WorldEntitiesModel::MoneyWorkbenches, entries)) {
@@ -635,20 +661,46 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
                 const std::uintptr_t model = entry.value;
                 if (model <= 0x10000) continue;
 
-                rob_run::TableRecord record{};
-                if (!rob_run::ReadMoneyWorkbench(model, record) || !ValidPosition(record.position))
+                const std::uintptr_t descModel = RobRunMemory::ReadPtr(
+                    model + rr::MoneyWorkbenchModel::DescriptionModel);
+                const std::uintptr_t locDesc = descModel > 0x10000
+                    ? RobRunMemory::ReadPtr(descModel + rr::MoneyWorkbenchModel::DescValue) : 0;
+                if (locDesc <= 0x10000) continue;
+
+                Vector3 position{};
+                if (!RobRunMemory::ReadVector3(locDesc + rr::MoneyWorkbenchModel::Position, position) ||
+                    !ValidPosition(position))
                     continue;
+
+                const float yaw = RobRunMemory::ReadFloat(
+                    locDesc + rr::MoneyWorkbenchModel::Orientation + 0x04);
+                const bool hasYaw = std::isfinite(yaw) && yaw != 0.f;
+
+                int dirtyCash = 0;
+                int cleanCash = 0;
+                const std::uintptr_t data = RobRunMemory::ReadPtr(
+                    model + rr::MoneyWorkbenchModel::Data);
+                if (data > 0x10000) {
+                    const std::uintptr_t cleanObj = RobRunMemory::ReadPtr(
+                        data + rr::MoneyWorkbenchData::CleanAmount);
+                    const std::uintptr_t dirtyObj = RobRunMemory::ReadPtr(
+                        data + rr::MoneyWorkbenchData::DirtyAmount);
+                    if (cleanObj > 0x10000)
+                        cleanCash = RobRunMemory::ReadInt32(cleanObj + rr::CashAmountData::Value);
+                    if (dirtyObj > 0x10000)
+                        dirtyCash = RobRunMemory::ReadInt32(dirtyObj + rr::CashAmountData::Value);
+                }
 
                 Entity entity{};
                 entity.id = entry.key;
                 entity.kind = Kind::MoneyWorkbench;
-                entity.position = record.position;
-                entity.cashAmount = record.total_cash;
-                entity.dirtyCash = record.dirty_cash;
-                entity.cleanCash = record.clean_cash;
-                entity.hasCashAmount = (record.total_cash > 0 || record.clean_cash > 0 || record.dirty_cash > 0);
-                entity.yaw = record.yaw;
-                entity.hasYaw = std::isfinite(record.yaw) && record.yaw != 0.f;
+                entity.position = position;
+                entity.cashAmount = cleanCash + dirtyCash;
+                entity.cleanCash = cleanCash;
+                entity.dirtyCash = dirtyCash;
+                entity.hasCashAmount = (entity.cashAmount > 0 || cleanCash > 0 || dirtyCash > 0);
+                entity.yaw = yaw;
+                entity.hasYaw = hasYaw;
                 entity.label = "Money Table";
                 out.entities.push_back(std::move(entity));
                 ++out.valuables;

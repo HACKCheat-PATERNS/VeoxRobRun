@@ -239,7 +239,6 @@
     <ClInclude Include="SDK\RobRunCamera.h" />
     <ClInclude Include="SDK\Inventory.h" />
     <ClInclude Include="SDK\WorldEntities.h" />
-    <ClInclude Include="SDK\money_tables.hpp" />
     <ClInclude Include="Security\XorStr.h" />
     <ClInclude Include="UI\VeoxMenu.h" />
     <ClInclude Include="UI\imgui_edited.hpp" />
