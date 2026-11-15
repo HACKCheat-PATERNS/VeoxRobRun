@@ -235,7 +235,8 @@ bool ProjectWorldAABB(const Projector& project, const Vector3& worldPos,
 void DrawSphere2D(ImDrawList* dl, const ImVec2& center, float radius,
 	ImU32 fillCol, bool outline, ImU32 outlineCol, float outlineThickness)
 {
-	if (radius <= 0.5f) return;
+	if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(radius)) return;
+	if (radius <= 0.5f || radius > 250.0f) return;
 	const int segments = std::clamp((int)(radius * 1.5f), 12, 36);
 	dl->AddCircleFilled(center, radius, fillCol, segments);
 	if (outline && (outlineCol & IM_COL32_A_MASK) != 0) {
@@ -248,8 +249,11 @@ void DrawCapsule2D(ImDrawList* dl, const ImVec2& a, float radiusA,
 	bool outline, ImU32 outlineCol, float outlineThickness,
 	bool capA, bool capB)
 {
-	radiusA = std::max(0.5f, radiusA);
-	radiusB = std::max(0.5f, radiusB);
+	if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(b.x) || !std::isfinite(b.y) ||
+		!std::isfinite(radiusA) || !std::isfinite(radiusB)) return;
+
+	radiusA = std::clamp(radiusA, 0.5f, 250.0f);
+	radiusB = std::clamp(radiusB, 0.5f, 250.0f);
 
 	const float dx = b.x - a.x;
 	const float dy = b.y - a.y;

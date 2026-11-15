@@ -31,31 +31,42 @@ static bool Project(const Matrix4x4& viewProjection, const Vector3& world,
 static bool ProjectWithRadius(const Matrix4x4& vp, const Vector3& world, float worldRadius,
 	int width, int height, ImVec2& outScreen, float& outRadius)
 {
+	if (width <= 0 || height <= 0)
+		return false;
+
+	// Forward camera depth gate: reject points in the near-clipping frustum (< 0.40m)
+	// where perspective projection divides by ~zero and explodes into massive screen coordinates.
+	const float clipW = vp.matrix[0][3] * world.x + vp.matrix[1][3] * world.y +
+		vp.matrix[2][3] * world.z + vp.matrix[3][3];
+	if (!std::isfinite(clipW) || clipW < 0.40f)
+		return false;
+
 	if (!Project(vp, world, width, height, outScreen))
 		return false;
 
-	ImVec2 scrOffsetY{};
-	float rY = 0.0f;
-	if (Project(vp, Vector3(world.x, world.y + worldRadius, world.z), width, height, scrOffsetY)) {
-		rY = std::abs(scrOffsetY.y - outScreen.y);
-	}
+	if (!std::isfinite(outScreen.x) || !std::isfinite(outScreen.y))
+		return false;
 
-	ImVec2 scrOffsetX{};
-	float rX = 0.0f;
-	if (Project(vp, Vector3(world.x + worldRadius, world.y, world.z), width, height, scrOffsetX)) {
-		rX = std::abs(scrOffsetX.x - outScreen.x);
-	}
+	// Reject points far outside visible display margin
+	constexpr float kMargin = 200.0f;
+	if (outScreen.x < -kMargin || outScreen.x > (float)width + kMargin ||
+		outScreen.y < -kMargin || outScreen.y > (float)height + kMargin)
+		return false;
 
-	outRadius = std::max(rX, rY);
-	if (outRadius < 0.5f) {
-		const float clipW = vp.matrix[0][3] * world.x + vp.matrix[1][3] * world.y +
-			vp.matrix[2][3] * world.z + vp.matrix[3][3];
-		if (clipW > 0.01f) {
-			outRadius = (worldRadius / clipW) * ((float)height * 0.5f);
-		} else {
-			outRadius = 1.0f;
-		}
-	}
+	// Analytical perspective radius: r = (worldRadius / clipW) * (height * 0.5f) * cot(fovY / 2)
+	float fovScale = std::abs(vp.matrix[1][1]);
+	if (fovScale < 0.5f || fovScale > 4.0f) fovScale = 1.0f;
+
+	const float r = (worldRadius / clipW) * ((float)height * 0.5f) * fovScale;
+	if (!std::isfinite(r) || r < 0.5f)
+		return false;
+
+	// Strict upper limit: no bone capsule or joint can exceed 20% of screen height
+	const float maxRadius = (float)height * 0.20f;
+	if (r > maxRadius)
+		return false;
+
+	outRadius = r;
 	return true;
 }
 
@@ -90,6 +101,14 @@ static void DrawCapsuleSegment(ImDrawList* dl, const Matrix4x4& vp, int screenW,
 	if (!ProjectWithRadius(vp, a, radiusA, screenW, screenH, sa, ra)) return;
 	if (!ProjectWithRadius(vp, b, radiusB, screenW, screenH, sb, rb)) return;
 
+	// Sanity limit: screen distance between two bone joints cannot exceed screen height
+	const float dx = sb.x - sa.x;
+	const float dy = sb.y - sa.y;
+	const float distSq = dx * dx + dy * dy;
+	const float maxDist = (float)screenH * 0.85f;
+	if (distSq > maxDist * maxDist)
+		return;
+
 	Esp::DrawCapsule2D(dl, sa, ra, sb, rb, fillCol, outline, outlineCol, outlineThick, capA, capB);
 }
 
@@ -115,6 +134,12 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 
 	const Vector3 root = ent.position;
 	if (std::abs(root.x) < 0.1f && std::abs(root.y) < 0.1f && std::abs(root.z) < 0.1f)
+		return;
+
+	// Reject entities inside the near camera clipping plane
+	const float rootClipW = vp.matrix[0][3] * root.x + vp.matrix[1][3] * root.y +
+		vp.matrix[2][3] * root.z + vp.matrix[3][3];
+	if (!std::isfinite(rootClipW) || rootClipW < 0.40f)
 		return;
 
 	ImU32 chamsCol = Esp::ShadeColour(pcfg.ChamsColour, pcfg.ChamsAlpha);
@@ -152,7 +177,10 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 
 	bool drawnAny = false;
 
-	// 1. Torso Quad Fill (smooth continuous body when shoulders and hips are resolved)
+	// 1. Torso rendering
+	// When shoulders and hips are available, verify convexity and non-intersection before AddQuadFilled.
+	// If the quad is self-intersecting (bow-tie when character turns/rotates), fall back to clean capsules.
+	bool torsoDrawn = false;
 	if (haveLS && haveRS && haveLHip && haveRHip)
 	{
 		ImVec2 sLS{}, sRS{}, sRHip{}, sLHip{};
@@ -162,19 +190,37 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 			ProjectWithRadius(vp, bp.rightHip, 0.09f * scale, screenW, screenH, sRHip, rRHip) &&
 			ProjectWithRadius(vp, bp.leftHip, 0.09f * scale, screenW, screenH, sLHip, rLHip))
 		{
-			dl->AddQuadFilled(sLS, sRS, sRHip, sLHip, chamsCol);
-			if (outline && (outlineCol & IM_COL32_A_MASK) != 0) {
-				dl->AddLine(sLS, sRS, outlineCol, outlineThick);
-				dl->AddLine(sRS, sRHip, outlineCol, outlineThick);
-				dl->AddLine(sRHip, sLHip, outlineCol, outlineThick);
-				dl->AddLine(sLHip, sLS, outlineCol, outlineThick);
+			// Check cross products of consecutive edges to ensure quad is convex and non-self-intersecting
+			const ImVec2 pts[4] = { sLS, sRS, sRHip, sLHip };
+			bool isConvex = true;
+			float sign = 0.f;
+			for (int i = 0; i < 4; ++i) {
+				const ImVec2& p0 = pts[i];
+				const ImVec2& p1 = pts[(i + 1) % 4];
+				const ImVec2& p2 = pts[(i + 2) % 4];
+				const float cp = (p1.x - p0.x) * (p2.y - p1.y) - (p1.y - p0.y) * (p2.x - p1.x);
+				if (std::abs(cp) < 1.0f) { isConvex = false; break; }
+				if (sign == 0.f) sign = (cp > 0.f) ? 1.f : -1.f;
+				else if ((cp > 0.f && sign < 0.f) || (cp < 0.f && sign > 0.f)) { isConvex = false; break; }
 			}
-			drawnAny = true;
+
+			if (isConvex) {
+				dl->AddQuadFilled(sLS, sRS, sRHip, sLHip, chamsCol);
+				if (outline && (outlineCol & IM_COL32_A_MASK) != 0) {
+					dl->AddLine(sLS, sRS, outlineCol, outlineThick);
+					dl->AddLine(sRS, sRHip, outlineCol, outlineThick);
+					dl->AddLine(sRHip, sLHip, outlineCol, outlineThick);
+					dl->AddLine(sLHip, sLS, outlineCol, outlineThick);
+				}
+				torsoDrawn = true;
+				drawnAny = true;
+			}
 		}
 	}
-	else
+
+	if (!torsoDrawn)
 	{
-		// Fallback Torso: Neck -> Chest -> Pelvis capsules
+		// Continuous capsule torso: Neck -> Chest -> Pelvis + shoulder/hip bridges
 		if (haveNeck && haveChest)
 		{
 			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.neck, 0.08f * scale,
@@ -185,6 +231,18 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 		{
 			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.chest, 0.15f * scale,
 				bp.pelvis, 0.13f * scale, root, chamsCol, outline, outlineCol, outlineThick, false, true);
+			drawnAny = true;
+		}
+		if (haveLS && haveRS)
+		{
+			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftShoulder, 0.08f * scale,
+				bp.rightShoulder, 0.08f * scale, root, chamsCol, outline, outlineCol, outlineThick, false, false);
+			drawnAny = true;
+		}
+		if (haveLHip && haveRHip)
+		{
+			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftHip, 0.09f * scale,
+				bp.rightHip, 0.09f * scale, root, chamsCol, outline, outlineCol, outlineThick, false, false);
 			drawnAny = true;
 		}
 	}
@@ -340,8 +398,25 @@ void DrawPlayers()
 		if (haveLocalPosition && (int)distF > pcfg.MaxDistance)
 			continue;
 
+		// Filter out local player and near-camera intersecting models:
+		// If localEntityId is unresolved (-1), local player has distF ~ 0.
+		if (haveLocalPosition && distF < 0.75f)
+			continue;
+
+		// Camera proximity filter: entities clipping directly into camera
+		if (snapshot->camera.valid) {
+			const float camDist = Distance(entPos, snapshot->camera.position);
+			if (camDist < 0.50f)
+				continue;
+		}
+
 		ImVec2 screenPos{};
 		if (!Project(viewProjection, entPos, screenW, screenH, screenPos))
+			continue;
+
+		// Peripheral off-screen filter: skip entities far outside visible screen
+		if (screenPos.x < -300.f || screenPos.x > (float)screenW + 300.f ||
+			screenPos.y < -300.f || screenPos.y > (float)screenH + 300.f)
 			continue;
 
 		// --- chams ---
