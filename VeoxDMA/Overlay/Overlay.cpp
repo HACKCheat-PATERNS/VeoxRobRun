@@ -2,6 +2,7 @@
 #include "Overlay.h"
 #include "OverlayNotify.h"
 #include "ConfigInstance.h"
+#include "Input/InputManager.h"
 #include "ImGUI/imgui.h"
 #include "ImGUI/imgui_impl_dx11.h"
 #include "ImGUI/imgui_impl_win32.h"
@@ -212,7 +213,9 @@ bool KeyJustPressed(int vk)
 {
 	static bool previous[256] = {};
 	if (vk < 0 || vk > 255) return false;
-	const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+	const bool dmaDown = Keyboard::IsReady() && Keyboard::IsKeyDown(static_cast<uint32_t>(vk));
+	const bool hostDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
+	const bool down = dmaDown || hostDown;
 	const bool pressed = down && !previous[vk];
 	previous[vk] = down;
 	return pressed;

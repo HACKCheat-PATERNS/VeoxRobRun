@@ -25,10 +25,46 @@ constexpr float kPi = 3.14159265358979323846f;
 
 // Keep in sync with the labels below. 0 means "always active".
 const int kKeys[] = {
-    VK_RBUTTON, VK_LBUTTON, VK_LMENU, VK_LSHIFT, VK_XBUTTON1, VK_XBUTTON2, 0
+    VK_RBUTTON,      // 0: Right Mouse
+    VK_LBUTTON,      // 1: Left Mouse
+    VK_LMENU,        // 2: Left Alt
+    VK_LSHIFT,       // 3: Left Shift
+    VK_XBUTTON1,     // 4: Mouse 4
+    VK_XBUTTON2,     // 5: Mouse 5
+    VK_MBUTTON,      // 6: Middle Mouse
+    VK_LCONTROL,     // 7: Left Ctrl
+    VK_CAPITAL,      // 8: Caps Lock
+    VK_SPACE,        // 9: Space
+    VK_TAB,          // 10: Tab
+    'C',             // 11: C
+    'V',             // 12: V
+    'E',             // 13: E
+    'F',             // 14: F
+    'Q',             // 15: Q
+    'X',             // 16: X
+    'Z',             // 17: Z
+    0                // 18: Always
 };
 const char* const kKeyNames[] = {
-    "Right Mouse", "Left Mouse", "Left Alt", "Left Shift", "Mouse 4", "Mouse 5", "Always"
+    "Right Mouse",
+    "Left Mouse",
+    "Left Alt",
+    "Left Shift",
+    "Mouse 4",
+    "Mouse 5",
+    "Middle Mouse",
+    "Left Ctrl",
+    "Caps Lock",
+    "Space",
+    "Tab",
+    "C",
+    "V",
+    "E",
+    "F",
+    "Q",
+    "X",
+    "Z",
+    "Always"
 };
 constexpr int kKeyCount = static_cast<int>(sizeof(kKeys) / sizeof(kKeys[0]));
 
@@ -101,7 +137,15 @@ bool Held(int keyIndex, const char** source)
         return true;
     }
 
-    if ((GetAsyncKeyState(vk) & 0x8000) != 0) {
+    auto isHostDown = [](int k) -> bool {
+        if ((GetAsyncKeyState(k) & 0x8000) != 0) return true;
+        if (k == VK_LMENU || k == VK_RMENU) return (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+        if (k == VK_LSHIFT || k == VK_RSHIFT) return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (k == VK_LCONTROL || k == VK_RCONTROL) return (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+        return false;
+    };
+
+    if (isHostDown(vk)) {
         if (source) *source = "host keyboard";
         return true;
     }

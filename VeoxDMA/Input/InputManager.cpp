@@ -461,10 +461,21 @@ void Keyboard::UpdateKeys()
 	uint8_t fresh[64] = {};
 	DWORD read = 0;
 	if (!VMMDLL_MemReadEx(TargetProcess.vHandle, win_logon_pid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, gafAsyncKeyStateExport, fresh, 64, &read, VMMDLL_FLAG_NOCACHE) || read != 64)
-		return; // keep the previous state rather than reporting every key released
+	{
+		const int altPid = TargetProcess.GetPID();
+		if (altPid && altPid != win_logon_pid)
+		{
+			if (!VMMDLL_MemReadEx(TargetProcess.vHandle, altPid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, gafAsyncKeyStateExport, fresh, 64, &read, VMMDLL_FLAG_NOCACHE) || read != 64)
+				return;
+		}
+		else
+		{
+			return; // keep the previous state rather than reporting every key released
+		}
+	}
 	memcpy(state_bitmap, fresh, 64);
 	for (int vk = 0; vk < 256; ++vk)
-		if ((state_bitmap[(vk * 2 / 8)] & 1 << vk % 4 * 2) && !(previous_key_state_bitmap[(vk * 2 / 8)] & 1 << vk % 4 * 2))
+		if ((state_bitmap[(vk * 2 / 8)] & (1 << ((vk % 4) * 2))) && !(previous_key_state_bitmap[(vk * 2 / 8)] & (1 << ((vk % 4) * 2))))
 			previous_state_bitmap[vk / 8] |= 1 << vk % 8;
 }
 
@@ -485,7 +496,26 @@ bool Keyboard::IsKeyDown(uint32_t virtual_key_code)
 		}
 	}
 	std::lock_guard<std::mutex> lock(g_keySnapMutex);
-	return (g_keySnapshot[(virtual_key_code * 2 / 8)] & 1 << virtual_key_code % 4 * 2) != 0;
+	auto isBitDown = [](uint32_t vk) -> bool {
+		if (vk >= 256) return false;
+		return (g_keySnapshot[(vk * 2 / 8)] & (1 << ((vk % 4) * 2))) != 0;
+	};
+	if (isBitDown(virtual_key_code))
+		return true;
+	// Resolve generic vs specific modifier keys (Shift, Alt, Ctrl) across Windows builds
+	if (virtual_key_code == VK_LMENU || virtual_key_code == VK_RMENU)
+		return isBitDown(VK_MENU);
+	if (virtual_key_code == VK_LSHIFT || virtual_key_code == VK_RSHIFT)
+		return isBitDown(VK_SHIFT);
+	if (virtual_key_code == VK_LCONTROL || virtual_key_code == VK_RCONTROL)
+		return isBitDown(VK_CONTROL);
+	if (virtual_key_code == VK_MENU)
+		return isBitDown(VK_LMENU) || isBitDown(VK_RMENU);
+	if (virtual_key_code == VK_SHIFT)
+		return isBitDown(VK_LSHIFT) || isBitDown(VK_RSHIFT);
+	if (virtual_key_code == VK_CONTROL)
+		return isBitDown(VK_LCONTROL) || isBitDown(VK_RCONTROL);
+	return false;
 }
 
 bool Keyboard::IsReady()
