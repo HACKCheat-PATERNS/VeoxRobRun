@@ -72,12 +72,12 @@ public:
 	// Character 3D Capsule Chams (100% read-only DMA overlay silhouette)
 	bool Chams = false;
 	D2D1::ColorF ChamsColour = Colour(140, 90, 255);
-	float ChamsAlpha = 0.55f;
+	float ChamsAlpha = 0.45f;
 	bool ChamsVisCheck = true;
 	D2D1::ColorF ChamsVisibleColour = Colour(255, 65, 65);
 	D2D1::ColorF ChamsHiddenColour = Colour(120, 80, 255);
-	bool ChamsOutline = true;
-	D2D1::ColorF ChamsOutlineColour = Colour(255, 255, 255);
+	bool ChamsOutline = false;
+	D2D1::ColorF ChamsOutlineColour = Colour(200, 180, 255);
 	float ChamsScale = 1.0f;
 	bool Skeleton = true;
     void ToJsonColour(json* j, const std::string& name, D2D1::ColorF* colour)

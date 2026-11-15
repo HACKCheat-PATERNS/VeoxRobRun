@@ -245,7 +245,8 @@ void DrawSphere2D(ImDrawList* dl, const ImVec2& center, float radius,
 
 void DrawCapsule2D(ImDrawList* dl, const ImVec2& a, float radiusA,
 	const ImVec2& b, float radiusB, ImU32 fillCol,
-	bool outline, ImU32 outlineCol, float outlineThickness)
+	bool outline, ImU32 outlineCol, float outlineThickness,
+	bool capA, bool capB)
 {
 	radiusA = std::max(0.5f, radiusA);
 	radiusB = std::max(0.5f, radiusB);
@@ -262,13 +263,11 @@ void DrawCapsule2D(ImDrawList* dl, const ImVec2& a, float radiusA,
 
 	const float ux = dx / dist;
 	const float uy = dy / dist;
-	// Perpendicular normal: pointing to the "left" of the segment a -> b
 	const float nx = -uy;
 	const float ny = ux;
 
 	const float dr = radiusA - radiusB;
 
-	// If one circle is completely inside the other
 	if (std::abs(dr) >= dist) {
 		if (radiusA >= radiusB)
 			DrawSphere2D(dl, a, radiusA, fillCol, outline, outlineCol, outlineThickness);
@@ -280,59 +279,79 @@ void DrawCapsule2D(ImDrawList* dl, const ImVec2& a, float radiusA,
 	const float sinPhi = std::clamp(dr / dist, -0.9999f, 0.9999f);
 	const float cosPhi = std::sqrt(std::max(0.0f, 1.0f - sinPhi * sinPhi));
 
-	// Tangent unit normals
 	const float n1x = nx * cosPhi + ux * sinPhi;
 	const float n1y = ny * cosPhi + uy * sinPhi;
 
 	const float n2x = -nx * cosPhi + ux * sinPhi;
 	const float n2y = -ny * cosPhi + uy * sinPhi;
 
-	// Arc on cap B from n1 through +u to n2:
-	// beta = acos(sinPhi) = pi/2 - phi
 	const float beta = std::acos(sinPhi);
 	constexpr int kArcSteps = 6;
 
 	std::vector<ImVec2> poly;
-	poly.reserve(kArcSteps * 2 + 4);
+	poly.reserve(kArcSteps * 2 + 6);
 
-	// Tangent point on A (side 1)
-	poly.push_back(ImVec2(a.x + radiusA * n1x, a.y + radiusA * n1y));
+	const ImVec2 tA1(a.x + radiusA * n1x, a.y + radiusA * n1y);
+	const ImVec2 tB1(b.x + radiusB * n1x, b.y + radiusB * n1y);
+	const ImVec2 tB2(b.x + radiusB * n2x, b.y + radiusB * n2y);
+	const ImVec2 tA2(a.x + radiusA * n2x, a.y + radiusA * n2y);
 
-	// Tangent point on B (side 1)
-	poly.push_back(ImVec2(b.x + radiusB * n1x, b.y + radiusB * n1y));
+	poly.push_back(tA1);
+	poly.push_back(tB1);
 
-	// Sweep around cap B from side 1 through +u to side 2
-	for (int i = 1; i < kArcSteps; ++i) {
-		const float t = -1.0f + 2.0f * ((float)i / (float)kArcSteps);
-		const float psi = t * beta;
-		const float cosPsi = std::cos(psi);
-		const float sinPsi = std::sin(psi);
-		const float vx = ux * cosPsi - nx * sinPsi;
-		const float vy = uy * cosPsi - ny * sinPsi;
-		poly.push_back(ImVec2(b.x + radiusB * vx, b.y + radiusB * vy));
+	std::vector<ImVec2> arcB;
+	if (capB) {
+		arcB.reserve(kArcSteps + 1);
+		arcB.push_back(tB1);
+		for (int i = 1; i < kArcSteps; ++i) {
+			const float t = -1.0f + 2.0f * ((float)i / (float)kArcSteps);
+			const float psi = t * beta;
+			const float cosPsi = std::cos(psi);
+			const float sinPsi = std::sin(psi);
+			const float vx = ux * cosPsi - nx * sinPsi;
+			const float vy = uy * cosPsi - ny * sinPsi;
+			const ImVec2 pt(b.x + radiusB * vx, b.y + radiusB * vy);
+			poly.push_back(pt);
+			arcB.push_back(pt);
+		}
+		arcB.push_back(tB2);
 	}
+	poly.push_back(tB2);
+	poly.push_back(tA2);
 
-	// Tangent point on B (side 2)
-	poly.push_back(ImVec2(b.x + radiusB * n2x, b.y + radiusB * n2y));
-
-	// Tangent point on A (side 2)
-	poly.push_back(ImVec2(a.x + radiusA * n2x, a.y + radiusA * n2y));
-
-	// Sweep around cap A from side 2 through -u to side 1
-	const float gamma = 3.14159265f - beta;
-	for (int i = 1; i < kArcSteps; ++i) {
-		const float t = -1.0f + 2.0f * ((float)i / (float)kArcSteps);
-		const float psi = t * gamma;
-		const float cosPsi = std::cos(psi);
-		const float sinPsi = std::sin(psi);
-		const float wx = -ux * cosPsi + nx * sinPsi;
-		const float wy = -uy * cosPsi + ny * sinPsi;
-		poly.push_back(ImVec2(a.x + radiusA * wx, a.y + radiusA * wy));
+	std::vector<ImVec2> arcA;
+	if (capA) {
+		arcA.reserve(kArcSteps + 1);
+		arcA.push_back(tA2);
+		const float gamma = 3.14159265f - beta;
+		for (int i = 1; i < kArcSteps; ++i) {
+			const float t = -1.0f + 2.0f * ((float)i / (float)kArcSteps);
+			const float psi = t * gamma;
+			const float cosPsi = std::cos(psi);
+			const float sinPsi = std::sin(psi);
+			const float wx = -ux * cosPsi + nx * sinPsi;
+			const float wy = -uy * cosPsi + ny * sinPsi;
+			const ImVec2 pt(a.x + radiusA * wx, a.y + radiusA * wy);
+			poly.push_back(pt);
+			arcA.push_back(pt);
+		}
+		arcA.push_back(tA1);
 	}
 
 	dl->AddConvexPolyFilled(poly.data(), (int)poly.size(), fillCol);
+
 	if (outline && (outlineCol & IM_COL32_A_MASK) != 0) {
-		dl->AddPolyline(poly.data(), (int)poly.size(), outlineCol, ImDrawFlags_Closed, outlineThickness);
+		// Stroke lateral edge 1
+		dl->AddLine(tA1, tB1, outlineCol, outlineThickness);
+		// Stroke lateral edge 2
+		dl->AddLine(tB2, tA2, outlineCol, outlineThickness);
+		// Stroke outer extremity arcs without drawing interior seam circles
+		if (capB && arcB.size() >= 2) {
+			dl->AddPolyline(arcB.data(), (int)arcB.size(), outlineCol, 0, outlineThickness);
+		}
+		if (capA && arcA.size() >= 2) {
+			dl->AddPolyline(arcA.data(), (int)arcA.size(), outlineCol, 0, outlineThickness);
+		}
 	}
 }
 

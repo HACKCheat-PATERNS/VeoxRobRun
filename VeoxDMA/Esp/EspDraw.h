@@ -96,9 +96,10 @@ ImU32 D2DColorToImU32(const D2D1::ColorF& c);
 void DrawSphere2D(ImDrawList* dl, const ImVec2& center, float radius,
 	ImU32 fillCol, bool outline = false, ImU32 outlineCol = 0, float outlineThickness = 1.0f);
 
-// 2D perspective-projected tapered capsule with convex hull tangent joins and circular endcaps.
+// 2D perspective-projected tapered capsule with convex hull tangent joins and optional circular endcaps.
 void DrawCapsule2D(ImDrawList* dl, const ImVec2& a, float radiusA,
 	const ImVec2& b, float radiusB, ImU32 fillCol,
-	bool outline = false, ImU32 outlineCol = 0, float outlineThickness = 1.0f);
+	bool outline = false, ImU32 outlineCol = 0, float outlineThickness = 1.0f,
+	bool capA = true, bool capB = true);
 
 } // namespace Esp
