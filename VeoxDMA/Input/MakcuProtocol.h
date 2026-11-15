@@ -101,7 +101,18 @@ struct Parser {
         }
         if (byte == '\r' || byte == '\n') {
             line[size] = 0;
-            const bool version = !overflow && std::strstr(line.data(), "km.MAKCU") != nullptr;
+            auto matchesVersion = [](const char* str) -> bool {
+                if (!str || !*str) return false;
+                for (const char* p = str; *p; ++p) {
+                    if ((p[0] == 'M' || p[0] == 'm') &&
+                        (p[1] == 'A' || p[1] == 'a') &&
+                        (p[2] == 'K' || p[2] == 'k') &&
+                        (p[3] == 'C' || p[3] == 'c') &&
+                        (p[4] == 'U' || p[4] == 'u')) return true;
+                }
+                return std::strstr(str, "km.version") != nullptr;
+            };
+            const bool version = matchesVersion(line.data());
             const bool physical = !overflow && ParsePhysical({line.data(), size}, controller);
             size = 0; overflow = false;
             return version ? Event::Version : physical ? Event::Physical : Event::None;

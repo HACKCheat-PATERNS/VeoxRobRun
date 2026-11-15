@@ -58,9 +58,22 @@ class Backend final : public DeviceBackend {
         return !cancelled();
     }
     bool Write(const void* data, size_t len) {
-        DWORD count = 0;
-        if (!WriteFile(serial, data, DWORD(len), &count, nullptr)) return Fail("Serial write failed", GetLastError());
-        if (count != len) return Fail("Short serial write; command delivery is uncertain", ERROR_WRITE_FAULT);
+        const uint8_t* ptr = static_cast<const uint8_t*>(data);
+        size_t remaining = len;
+        const auto deadline = Clock::now() + std::chrono::milliseconds(300);
+        while (remaining > 0) {
+            DWORD count = 0;
+            if (!WriteFile(serial, ptr, DWORD(remaining), &count, nullptr))
+                return Fail("Serial write failed", GetLastError());
+            if (count == 0) {
+                if (Clock::now() >= deadline)
+                    return Fail("Serial write timed out", ERROR_WRITE_FAULT);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            ptr += count;
+            remaining -= count;
+        }
         return true;
     }
     bool Text(const char* s) { return Write(s, std::strlen(s)); }
@@ -165,7 +178,10 @@ class Backend final : public DeviceBackend {
         DWORD errors = 0; COMSTAT status{};
         if (!ClearCommError(serial, &errors, &status)) return Fail("Serial link unavailable", GetLastError());
         if (errors & (CE_BREAK | CE_FRAME | CE_RXPARITY | CE_OVERRUN | CE_RXOVER)) {
-            input = {}; return Fail("Serial receive corruption; resetting the session", errors);
+            if (errors & (CE_OVERRUN | CE_RXOVER)) {
+                PurgeComm(serial, PURGE_RXCLEAR);
+                makcu = {};
+            }
         }
         for (int batch = 0; batch < 8 && status.cbInQue; ++batch) {
             unsigned char bytes[512]; DWORD count = 0;
@@ -177,10 +193,18 @@ class Backend final : public DeviceBackend {
                 if (IsMakcu(config.kind)) {
                     const auto event = makcu.Feed(bytes[i]);
                     if (event == Makcu::Parser::Event::Version) lastReply = Clock::now();
-                    if (event == Makcu::Parser::Event::Buttons) Buttons(makcu.mask);
-                    if (event == Makcu::Parser::Event::Physical && config.kind == DeviceKind::Controller)
+                    if (event == Makcu::Parser::Event::Buttons) {
+                        Buttons(makcu.mask);
+                        lastReply = Clock::now();
+                    }
+                    if (event == Makcu::Parser::Event::Physical && config.kind == DeviceKind::Controller) {
                         ControllerPhysical(makcu.controller);
-                    if (event == Makcu::Parser::Event::Frame && !MakEvent()) return false;
+                        lastReply = Clock::now();
+                    }
+                    if (event == Makcu::Parser::Event::Frame) {
+                        lastReply = Clock::now();
+                        if (!MakEvent()) return false;
+                    }
                 } else if (config.kind == DeviceKind::Medius) {
                     uint8_t type, seq; const uint8_t* payload; size_t n;
                     if (!medius.Feed(bytes[i], type, seq, payload, n)) continue;
@@ -244,8 +268,8 @@ class Backend final : public DeviceBackend {
         endpoint = selected;
         serial = CreateFileA(("\\\\.\\" + selected).c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (serial == INVALID_HANDLE_VALUE) return Fail("Cannot open COM port; check cable and other applications", GetLastError());
-        COMMTIMEOUTS timeouts{}; timeouts.ReadIntervalTimeout = MAXDWORD; timeouts.WriteTotalTimeoutConstant = 20;
-        if (!SetupComm(serial, 4096, 256) || !SetCommTimeouts(serial, &timeouts)) return Fail("Cannot configure COM buffers/timeouts", GetLastError());
+        COMMTIMEOUTS timeouts{}; timeouts.ReadIntervalTimeout = MAXDWORD; timeouts.WriteTotalTimeoutConstant = 250;
+        if (!SetupComm(serial, 8192, 4096) || !SetCommTimeouts(serial, &timeouts)) return Fail("Cannot configure COM buffers/timeouts", GetLastError());
         PurgeComm(serial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
         if (IsMakcu(config.kind)) {
             const int rates[] = {config.baud, lastBaud, 115200, 4000000, 921600, 1500000, 2000000, 3000000};
@@ -415,7 +439,7 @@ public:
         }
         if (!ReadSerial()) return false;
         if ((IsMakcu(config.kind) || config.kind == DeviceKind::Medius)
-            && now - lastReply > std::chrono::seconds(15)) return Fail("Device health reply timed out");
+            && now - lastReply > std::chrono::seconds(25)) return Fail("Device health reply timed out");
         if (UsesController(config)) {
             if (controllerResubscribe) {
                 if (!Text("km.controller(1)\r\n")) return false;
@@ -439,7 +463,7 @@ public:
                 controllerOutput = {}; if (!ControllerOutput()) return false;
             }
         }
-        if (now - heartbeat >= std::chrono::seconds(1)) {
+        if (now - heartbeat >= std::chrono::seconds(5) && now - lastReply >= std::chrono::seconds(3)) {
             heartbeat = now;
             if (IsMakcu(config.kind)) return Text("km.version()\r\n");
             if (config.kind == DeviceKind::Medius) {

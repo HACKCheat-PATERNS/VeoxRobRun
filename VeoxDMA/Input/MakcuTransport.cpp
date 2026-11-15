@@ -114,24 +114,42 @@ struct Transport {
         return SetCommState(handle, &dcb) != FALSE;
     }
     bool Write(const void* data, size_t size) {
-        DWORD count = 0;
-        const bool wrote = WriteFile(handle, data, static_cast<DWORD>(size), &count, nullptr) != FALSE;
-        const DWORD error = wrote ? (count == size ? ERROR_SUCCESS : ERROR_WRITE_FAULT) : GetLastError();
-        const bool ok = wrote && count == size;
-        if (ok) ++writeOk; else ++writeFail;
-        if (!ok) {
-            Log("serial write failed requested=%zu written=%lu osError=%lu", size, count, error);
-            SetLastError(error);
+        const uint8_t* ptr = static_cast<const uint8_t*>(data);
+        size_t remaining = size;
+        const auto start = GetTickCount64();
+        while (remaining > 0) {
+            DWORD count = 0;
+            if (!WriteFile(handle, ptr, static_cast<DWORD>(remaining), &count, nullptr)) {
+                const DWORD error = GetLastError();
+                Log("serial write failed requested=%zu remaining=%zu osError=%lu", size, remaining, error);
+                SetLastError(error);
+                ++writeFail;
+                return false;
+            }
+            if (count == 0) {
+                if (GetTickCount64() - start >= 300) {
+                    SetLastError(ERROR_WRITE_FAULT);
+                    ++writeFail;
+                    return false;
+                }
+                Sleep(1);
+                continue;
+            }
+            ptr += count;
+            remaining -= count;
         }
-        return ok;
+        ++writeOk;
+        return true;
     }
     bool Read(uint64_t gen) {
         DWORD errors = 0; COMSTAT status{};
         if (!ClearCommError(handle, &errors, &status)) return false;
         if (errors & (CE_BREAK | CE_FRAME | CE_RXPARITY | CE_OVERRUN | CE_RXOVER)) {
-            // A lost release must not leave a cached mouse bind held forever.
-            Log("serial receive error flags=0x%lX queuedRx=%lu queuedTx=%lu", errors, status.cbInQue, status.cbOutQue);
-            buttons = 0; parser = {}; SetLastError(ERROR_INVALID_DATA); return false;
+            Log("serial receive noise/overrun flags=0x%lX queuedRx=%lu queuedTx=%lu (cleared)", errors, status.cbInQue, status.cbOutQue);
+            if (errors & (CE_OVERRUN | CE_RXOVER)) {
+                PurgeComm(handle, PURGE_RXCLEAR);
+                parser = {};
+            }
         }
         if (!status.cbInQue) return true;
         unsigned char buffer[512]; DWORD count = 0;
@@ -154,6 +172,7 @@ struct Transport {
                         next = (previous & 0x1F0000u) | (pressed << 16) | 0x100u | parser.mask;
                     } while (!buttons.compare_exchange_weak(previous, next));
                     ++reports;
+                    lastVersion = GetTickCount64();
                 }
                 if (firstReport) Log("button monitoring verified generation=%llu mask=0x%02X", gen, parser.mask);
             } else if (event == Parser::Event::Version) lastVersion = GetTickCount64();
@@ -190,8 +209,8 @@ struct Transport {
             0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (handle == INVALID_HANDLE_VALUE) { Fail(gen,"Could not open Makcu port"); return false; }
         COMMTIMEOUTS timeouts{}; timeouts.ReadIntervalTimeout = MAXDWORD;
-        timeouts.WriteTotalTimeoutConstant = 20;
-        if (!SetupComm(handle, 4096, 256) || !SetCommTimeouts(handle,&timeouts)) {
+        timeouts.WriteTotalTimeoutConstant = 250;
+        if (!SetupComm(handle, 8192, 4096) || !SetCommTimeouts(handle,&timeouts)) {
             Fail(gen,"Could not configure Makcu port buffers/timeouts"); return false;
         }
         configured = true;
@@ -290,11 +309,11 @@ struct Transport {
             if (!Read(gen)) { Fail(gen,"Makcu receive/link error"); Close(); continue; }
             // Low-frequency liveness check; button monitoring is event driven.
             const auto now = GetTickCount64();
-            if (now - lastVersion > 15000) { SetLastError(WAIT_TIMEOUT); Fail(gen,"Makcu heartbeat reply timed out"); Close(); continue; }
+            if (now - lastVersion > 25000) { SetLastError(WAIT_TIMEOUT); Fail(gen,"Makcu heartbeat reply timed out"); Close(); continue; }
             static uint64_t logged = 0;
             static AimState previous = AimState::Disabled;
             static uint64_t priorOk = 0, priorFail = 0, priorReports = 0;
-            if (now - heartbeat >= 5000) {
+            if (now - heartbeat >= 5000 && now - lastVersion >= 3000) {
                 heartbeat = now;
                 static const char query[] = "km.version()\r\n";
                 if (!Write(query,sizeof(query)-1)) { Fail(gen,"Makcu heartbeat write failed"); Close(); continue; }
