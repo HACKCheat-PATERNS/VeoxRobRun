@@ -68,6 +68,18 @@ public:
 	// the pose raw, lower values damp jitter from partial or stale reads.
 	bool PoseSmoothing = true;
 	float PoseSmoothAlpha = 0.5f;
+
+	// Character 3D Capsule Chams (100% read-only DMA overlay silhouette)
+	bool Chams = false;
+	D2D1::ColorF ChamsColour = Colour(140, 90, 255);
+	float ChamsAlpha = 0.55f;
+	bool ChamsVisCheck = true;
+	D2D1::ColorF ChamsVisibleColour = Colour(255, 65, 65);
+	D2D1::ColorF ChamsHiddenColour = Colour(120, 80, 255);
+	bool ChamsOutline = true;
+	D2D1::ColorF ChamsOutlineColour = Colour(255, 255, 255);
+	float ChamsScale = 1.0f;
+	bool Skeleton = true;
     void ToJsonColour(json* j, const std::string& name, D2D1::ColorF* colour)
     {
         (*j)[ConfigName][name][LIT("r")] = colour->r;
@@ -131,6 +143,16 @@ public:
         ToJsonColour(&j, LIT("StaminaColour"), &StaminaColour);
         j[ConfigName][LIT("PoseSmoothing")] = PoseSmoothing;
         j[ConfigName][LIT("PoseSmoothAlpha")] = PoseSmoothAlpha;
+        j[ConfigName][LIT("Chams")] = Chams;
+        ToJsonColour(&j, LIT("ChamsColour"), &ChamsColour);
+        j[ConfigName][LIT("ChamsAlpha")] = ChamsAlpha;
+        j[ConfigName][LIT("ChamsVisCheck")] = ChamsVisCheck;
+        ToJsonColour(&j, LIT("ChamsVisibleColour"), &ChamsVisibleColour);
+        ToJsonColour(&j, LIT("ChamsHiddenColour"), &ChamsHiddenColour);
+        j[ConfigName][LIT("ChamsOutline")] = ChamsOutline;
+        ToJsonColour(&j, LIT("ChamsOutlineColour"), &ChamsOutlineColour);
+        j[ConfigName][LIT("ChamsScale")] = ChamsScale;
+        j[ConfigName][LIT("Skeleton")] = Skeleton;
 
         return j;
     }
@@ -179,6 +201,16 @@ public:
         FromJsonColour(j, LIT("StaminaColour"), &StaminaColour);
         PoseSmoothing = j[ConfigName].value(LIT("PoseSmoothing"), PoseSmoothing);
         PoseSmoothAlpha = j[ConfigName].value(LIT("PoseSmoothAlpha"), PoseSmoothAlpha);
+        Chams = j[ConfigName].value(LIT("Chams"), Chams);
+        FromJsonColour(j, LIT("ChamsColour"), &ChamsColour);
+        ChamsAlpha = j[ConfigName].value(LIT("ChamsAlpha"), ChamsAlpha);
+        ChamsVisCheck = j[ConfigName].value(LIT("ChamsVisCheck"), ChamsVisCheck);
+        FromJsonColour(j, LIT("ChamsVisibleColour"), &ChamsVisibleColour);
+        FromJsonColour(j, LIT("ChamsHiddenColour"), &ChamsHiddenColour);
+        ChamsOutline = j[ConfigName].value(LIT("ChamsOutline"), ChamsOutline);
+        FromJsonColour(j, LIT("ChamsOutlineColour"), &ChamsOutlineColour);
+        ChamsScale = j[ConfigName].value(LIT("ChamsScale"), ChamsScale);
+        Skeleton = j[ConfigName].value(LIT("Skeleton"), Skeleton);
     }
 };
 

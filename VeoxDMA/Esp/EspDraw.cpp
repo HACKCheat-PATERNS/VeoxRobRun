@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <vector>
 
 namespace Esp {
 
@@ -229,6 +230,110 @@ bool ProjectWorldAABB(const Projector& project, const Vector3& worldPos,
 	outMin = ImVec2(minX, minY);
 	outMax = ImVec2(maxX, maxY);
 	return (maxX - minX) >= minPx && (maxY - minY) >= minPx;
+}
+
+void DrawSphere2D(ImDrawList* dl, const ImVec2& center, float radius,
+	ImU32 fillCol, bool outline, ImU32 outlineCol, float outlineThickness)
+{
+	if (radius <= 0.5f) return;
+	const int segments = std::clamp((int)(radius * 1.5f), 12, 36);
+	dl->AddCircleFilled(center, radius, fillCol, segments);
+	if (outline && (outlineCol & IM_COL32_A_MASK) != 0) {
+		dl->AddCircle(center, radius, outlineCol, segments, outlineThickness);
+	}
+}
+
+void DrawCapsule2D(ImDrawList* dl, const ImVec2& a, float radiusA,
+	const ImVec2& b, float radiusB, ImU32 fillCol,
+	bool outline, ImU32 outlineCol, float outlineThickness)
+{
+	radiusA = std::max(0.5f, radiusA);
+	radiusB = std::max(0.5f, radiusB);
+
+	const float dx = b.x - a.x;
+	const float dy = b.y - a.y;
+	const float distSq = dx * dx + dy * dy;
+	const float dist = std::sqrt(distSq);
+
+	if (dist < 0.5f) {
+		DrawSphere2D(dl, a, std::max(radiusA, radiusB), fillCol, outline, outlineCol, outlineThickness);
+		return;
+	}
+
+	const float ux = dx / dist;
+	const float uy = dy / dist;
+	// Perpendicular normal: pointing to the "left" of the segment a -> b
+	const float nx = -uy;
+	const float ny = ux;
+
+	const float dr = radiusA - radiusB;
+
+	// If one circle is completely inside the other
+	if (std::abs(dr) >= dist) {
+		if (radiusA >= radiusB)
+			DrawSphere2D(dl, a, radiusA, fillCol, outline, outlineCol, outlineThickness);
+		else
+			DrawSphere2D(dl, b, radiusB, fillCol, outline, outlineCol, outlineThickness);
+		return;
+	}
+
+	const float sinPhi = std::clamp(dr / dist, -0.9999f, 0.9999f);
+	const float cosPhi = std::sqrt(std::max(0.0f, 1.0f - sinPhi * sinPhi));
+
+	// Tangent unit normals
+	const float n1x = nx * cosPhi + ux * sinPhi;
+	const float n1y = ny * cosPhi + uy * sinPhi;
+
+	const float n2x = -nx * cosPhi + ux * sinPhi;
+	const float n2y = -ny * cosPhi + uy * sinPhi;
+
+	// Arc on cap B from n1 through +u to n2:
+	// beta = acos(sinPhi) = pi/2 - phi
+	const float beta = std::acos(sinPhi);
+	constexpr int kArcSteps = 6;
+
+	std::vector<ImVec2> poly;
+	poly.reserve(kArcSteps * 2 + 4);
+
+	// Tangent point on A (side 1)
+	poly.push_back(ImVec2(a.x + radiusA * n1x, a.y + radiusA * n1y));
+
+	// Tangent point on B (side 1)
+	poly.push_back(ImVec2(b.x + radiusB * n1x, b.y + radiusB * n1y));
+
+	// Sweep around cap B from side 1 through +u to side 2
+	for (int i = 1; i < kArcSteps; ++i) {
+		const float t = -1.0f + 2.0f * ((float)i / (float)kArcSteps);
+		const float psi = t * beta;
+		const float cosPsi = std::cos(psi);
+		const float sinPsi = std::sin(psi);
+		const float vx = ux * cosPsi - nx * sinPsi;
+		const float vy = uy * cosPsi - ny * sinPsi;
+		poly.push_back(ImVec2(b.x + radiusB * vx, b.y + radiusB * vy));
+	}
+
+	// Tangent point on B (side 2)
+	poly.push_back(ImVec2(b.x + radiusB * n2x, b.y + radiusB * n2y));
+
+	// Tangent point on A (side 2)
+	poly.push_back(ImVec2(a.x + radiusA * n2x, a.y + radiusA * n2y));
+
+	// Sweep around cap A from side 2 through -u to side 1
+	const float gamma = 3.14159265f - beta;
+	for (int i = 1; i < kArcSteps; ++i) {
+		const float t = -1.0f + 2.0f * ((float)i / (float)kArcSteps);
+		const float psi = t * gamma;
+		const float cosPsi = std::cos(psi);
+		const float sinPsi = std::sin(psi);
+		const float wx = -ux * cosPsi + nx * sinPsi;
+		const float wy = -uy * cosPsi + ny * sinPsi;
+		poly.push_back(ImVec2(a.x + radiusA * wx, a.y + radiusA * wy));
+	}
+
+	dl->AddConvexPolyFilled(poly.data(), (int)poly.size(), fillCol);
+	if (outline && (outlineCol & IM_COL32_A_MASK) != 0) {
+		dl->AddPolyline(poly.data(), (int)poly.size(), outlineCol, ImDrawFlags_Closed, outlineThickness);
+	}
 }
 
 } // namespace Esp

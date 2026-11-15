@@ -953,14 +953,14 @@ void DrawVisuals()
 		const float r1 = ImMax(CardNaturalHeight("PLAYER ESP"), CardNaturalHeight("PLAYER WEAPONS"));
 		const float r2 = ImMax(CardNaturalHeight("PLAYER FLAGS"), CardNaturalHeight("RANGE"));
 		const float r3 = ImMax(CardNaturalHeight("TEXT & COLOURS"), CardNaturalHeight("COLOURS"));
-		const float r4 = ImMax(CardNaturalHeight("SKELETON"), CardNaturalHeight("WORLD ESP"));
+		const float r4 = ImMax(CardNaturalHeight("SKELETON & CHAMS"), CardNaturalHeight("WORLD ESP"));
 		ForceCardHeight("PLAYER ESP", r1);
 		ForceCardHeight("PLAYER WEAPONS", r1);
 		ForceCardHeight("PLAYER FLAGS", r2);
 		ForceCardHeight("RANGE", r2);
 		ForceCardHeight("TEXT & COLOURS", r3);
 		ForceCardHeight("COLOURS", r3);
-		ForceCardHeight("SKELETON", r4);
+		ForceCardHeight("SKELETON & CHAMS", r4);
 		ForceCardHeight("WORLD ESP", r4);
 	}
 
@@ -1003,9 +1003,26 @@ void DrawVisuals()
 			EndCard();
 		}
 
-		if (MatchAny({ "VisCheck", "WallCheck", "Interpolate", "Lead", "Native Camera" }))
+		if (MatchAny({ "Skeleton", "Draw Skeleton", "Chams", "Character Chams", "Limb Thickness",
+			"VisCheck", "WallCheck", "Interpolate", "Lead", "Native Camera" }))
 		{
-			BeginCard("SKELETON", kCardW);
+			BeginCard("SKELETON & CHAMS", kCardW);
+			ToggleRow("Draw Skeleton", &ConfigInstance.Player.Skeleton);
+			ColorToggleRow("Character Chams", &ConfigInstance.Player.Chams, ConfigInstance.Player.ChamsColour);
+			if (ConfigInstance.Player.Chams)
+			{
+				SliderFloatRow("Fill Opacity", &ConfigInstance.Player.ChamsAlpha, 0.1f, 1.0f);
+				SliderFloatRow("Limb Thickness", &ConfigInstance.Player.ChamsScale, 0.5f, 2.0f, "x");
+				ColorToggleRow("Chams Outline", &ConfigInstance.Player.ChamsOutline, ConfigInstance.Player.ChamsOutlineColour);
+				ToggleRow("Chams VisCheck", &ConfigInstance.Player.ChamsVisCheck);
+				if (ConfigInstance.Player.ChamsVisCheck)
+				{
+					ColorRow("Chams Visible", ConfigInstance.Player.ChamsVisibleColour);
+					ColorRow("Chams Occluded", ConfigInstance.Player.ChamsHiddenColour);
+				}
+			}
+
+			SectionLabel("SKELETON OCCLUSION");
 			ToggleRow("Enable VisCheck", &ConfigInstance.Player.VisCheck);
 			if (ConfigInstance.Player.VisCheck)
 			{

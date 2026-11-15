@@ -92,4 +92,13 @@ ImU32 ShadeColour(const D2D1::ColorF& c, float extraAlpha = 1.f);
 // overlay cannot carry private copies of the same conversion.
 ImU32 D2DColorToImU32(const D2D1::ColorF& c);
 
+// 2D perspective-projected circle/sphere for heads and joint anchors.
+void DrawSphere2D(ImDrawList* dl, const ImVec2& center, float radius,
+	ImU32 fillCol, bool outline = false, ImU32 outlineCol = 0, float outlineThickness = 1.0f);
+
+// 2D perspective-projected tapered capsule with convex hull tangent joins and circular endcaps.
+void DrawCapsule2D(ImDrawList* dl, const ImVec2& a, float radiusA,
+	const ImVec2& b, float radiusB, ImU32 fillCol,
+	bool outline = false, ImU32 outlineCol = 0, float outlineThickness = 1.0f);
+
 } // namespace Esp

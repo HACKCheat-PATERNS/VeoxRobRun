@@ -28,6 +28,161 @@ static bool Project(const Matrix4x4& viewProjection, const Vector3& world,
 	return true;
 }
 
+static bool ProjectWithRadius(const Matrix4x4& vp, const Vector3& world, float worldRadius,
+	int width, int height, ImVec2& outScreen, float& outRadius)
+{
+	if (!Project(vp, world, width, height, outScreen))
+		return false;
+
+	ImVec2 scrOffsetY{};
+	float rY = 0.0f;
+	if (Project(vp, Vector3(world.x, world.y + worldRadius, world.z), width, height, scrOffsetY)) {
+		rY = std::abs(scrOffsetY.y - outScreen.y);
+	}
+
+	ImVec2 scrOffsetX{};
+	float rX = 0.0f;
+	if (Project(vp, Vector3(world.x + worldRadius, world.y, world.z), width, height, scrOffsetX)) {
+		rX = std::abs(scrOffsetX.x - outScreen.x);
+	}
+
+	outRadius = std::max(rX, rY);
+	if (outRadius < 0.5f) {
+		const float clipW = vp.matrix[0][3] * world.x + vp.matrix[1][3] * world.y +
+			vp.matrix[2][3] * world.z + vp.matrix[3][3];
+		if (clipW > 0.01f) {
+			outRadius = (worldRadius / clipW) * ((float)height * 0.5f);
+		} else {
+			outRadius = 1.0f;
+		}
+	}
+	return true;
+}
+
+static void DrawCapsuleSegment(ImDrawList* dl, const Matrix4x4& vp, int screenW, int screenH,
+	const Vector3& a, float radiusA, const Vector3& b, float radiusB,
+	ImU32 fillCol, bool outline, ImU32 outlineCol, float outlineThick)
+{
+	ImVec2 sa{}, sb{};
+	float ra = 0.f, rb = 0.f;
+	if (!ProjectWithRadius(vp, a, radiusA, screenW, screenH, sa, ra)) return;
+	if (!ProjectWithRadius(vp, b, radiusB, screenW, screenH, sb, rb)) return;
+
+	Esp::DrawCapsule2D(dl, sa, ra, sb, rb, fillCol, outline, outlineCol, outlineThick);
+}
+
+static void DrawSpherePoint(ImDrawList* dl, const Matrix4x4& vp, int screenW, int screenH,
+	const Vector3& p, float radius, ImU32 fillCol, bool outline, ImU32 outlineCol, float outlineThick)
+{
+	ImVec2 sp{};
+	float r = 0.f;
+	if (!ProjectWithRadius(vp, p, radius, screenW, screenH, sp, r)) return;
+
+	Esp::DrawSphere2D(dl, sp, r, fillCol, outline, outlineCol, outlineThick);
+}
+
+static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
+	const Matrix4x4& vp, int screenW, int screenH, const PlayerConfig& pcfg)
+{
+	if (!pcfg.Chams)
+		return;
+
+	ImU32 chamsCol = Esp::ShadeColour(pcfg.ChamsColour, pcfg.ChamsAlpha);
+	if (pcfg.ChamsVisCheck) {
+		chamsCol = ent.visible
+			? Esp::ShadeColour(pcfg.ChamsVisibleColour, pcfg.ChamsAlpha)
+			: Esp::ShadeColour(pcfg.ChamsHiddenColour, pcfg.ChamsAlpha);
+	}
+
+	const bool outline = pcfg.ChamsOutline;
+	const ImU32 outlineCol = Esp::ShadeColour(pcfg.ChamsOutlineColour, std::min(1.0f, pcfg.ChamsAlpha * 1.5f));
+	const float outlineThick = 1.0f;
+	const float scale = std::clamp(pcfg.ChamsScale, 0.4f, 2.5f);
+
+	const auto& bp = ent.bonePoints;
+	if (bp.valid)
+	{
+		// 1. Head sphere
+		if (bp.hasHead)
+		{
+			DrawSpherePoint(dl, vp, screenW, screenH, bp.head, 0.12f * scale,
+				chamsCol, outline, outlineCol, outlineThick);
+		}
+
+		// 2. Neck and Spine / Torso
+		if (bp.hasHead && bp.hasNeck)
+		{
+			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.head, 0.10f * scale,
+				bp.neck, 0.08f * scale, chamsCol, outline, outlineCol, outlineThick);
+		}
+		if (bp.hasNeck && bp.hasChest)
+		{
+			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.neck, 0.08f * scale,
+				bp.chest, 0.16f * scale, chamsCol, outline, outlineCol, outlineThick);
+		}
+		if (bp.hasChest && bp.hasPelvis)
+		{
+			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.chest, 0.16f * scale,
+				bp.pelvis, 0.14f * scale, chamsCol, outline, outlineCol, outlineThick);
+		}
+
+		// 3. Shoulders
+		if (bp.hasChest)
+		{
+			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.chest, 0.14f * scale,
+				bp.leftShoulder, 0.09f * scale, chamsCol, outline, outlineCol, outlineThick);
+			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.chest, 0.14f * scale,
+				bp.rightShoulder, 0.09f * scale, chamsCol, outline, outlineCol, outlineThick);
+		}
+
+		// 4. Arms
+		DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftShoulder, 0.085f * scale,
+			bp.leftElbow, 0.075f * scale, chamsCol, outline, outlineCol, outlineThick);
+		DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftElbow, 0.075f * scale,
+			bp.leftHand, 0.065f * scale, chamsCol, outline, outlineCol, outlineThick);
+
+		DrawCapsuleSegment(dl, vp, screenW, screenH, bp.rightShoulder, 0.085f * scale,
+			bp.rightElbow, 0.075f * scale, chamsCol, outline, outlineCol, outlineThick);
+		DrawCapsuleSegment(dl, vp, screenW, screenH, bp.rightElbow, 0.075f * scale,
+			bp.rightHand, 0.065f * scale, chamsCol, outline, outlineCol, outlineThick);
+
+		// 5. Pelvis to Hips
+		if (bp.hasPelvis)
+		{
+			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.pelvis, 0.13f * scale,
+				bp.leftHip, 0.11f * scale, chamsCol, outline, outlineCol, outlineThick);
+			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.pelvis, 0.13f * scale,
+				bp.rightHip, 0.11f * scale, chamsCol, outline, outlineCol, outlineThick);
+		}
+
+		// 6. Legs
+		DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftHip, 0.110f * scale,
+			bp.leftKnee, 0.095f * scale, chamsCol, outline, outlineCol, outlineThick);
+		DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftKnee, 0.095f * scale,
+			bp.leftFoot, 0.075f * scale, chamsCol, outline, outlineCol, outlineThick);
+
+		DrawCapsuleSegment(dl, vp, screenW, screenH, bp.rightHip, 0.110f * scale,
+			bp.rightKnee, 0.095f * scale, chamsCol, outline, outlineCol, outlineThick);
+		DrawCapsuleSegment(dl, vp, screenW, screenH, bp.rightKnee, 0.095f * scale,
+			bp.rightFoot, 0.075f * scale, chamsCol, outline, outlineCol, outlineThick);
+	}
+	else
+	{
+		// Fallback: draw 3D capsules for each extracted bone segment
+		for (const auto& seg : ent.bones)
+		{
+			ImU32 segChamsCol = chamsCol;
+			if (pcfg.ChamsVisCheck) {
+				segChamsCol = seg.visible
+					? Esp::ShadeColour(pcfg.ChamsVisibleColour, pcfg.ChamsAlpha)
+					: Esp::ShadeColour(pcfg.ChamsHiddenColour, pcfg.ChamsAlpha);
+			}
+			DrawCapsuleSegment(dl, vp, screenW, screenH, seg.a, 0.085f * scale,
+				seg.b, 0.085f * scale, segChamsCol, outline, outlineCol, outlineThick);
+		}
+	}
+}
+
 void DrawPlayers()
 {
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
@@ -89,6 +244,12 @@ void DrawPlayers()
 		if (!Project(viewProjection, entPos, screenW, screenH, screenPos))
 			continue;
 
+		// --- chams ---
+		if (pcfg.Chams)
+		{
+			DrawPlayerChams(dl, ent, viewProjection, screenW, screenH, pcfg);
+		}
+
 		// --- skeleton bones + box ---
 		bool boxValid = false;
 		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
@@ -99,13 +260,16 @@ void DrawPlayers()
 			if (!Project(viewProjection, seg.a, screenW, screenH, a)) continue;
 			if (!Project(viewProjection, seg.b, screenW, screenH, b)) continue;
 
-			ImU32 segCol = espCol;
-			if (pcfg.VisCheck || pcfg.WallCheck) {
-				segCol = seg.visible
-					? Esp::D2DColorToImU32(pcfg.VisibleColour)
-					: Esp::D2DColorToImU32(pcfg.HiddenColour);
+			if (pcfg.Skeleton)
+			{
+				ImU32 segCol = espCol;
+				if (pcfg.VisCheck || pcfg.WallCheck) {
+					segCol = seg.visible
+						? Esp::D2DColorToImU32(pcfg.VisibleColour)
+						: Esp::D2DColorToImU32(pcfg.HiddenColour);
+				}
+				dl->AddLine(a, b, segCol, 2.f);
 			}
-			dl->AddLine(a, b, segCol, 2.f);
 			minX = std::min(minX, std::min(a.x, b.x));
 			maxX = std::max(maxX, std::max(a.x, b.x));
 			minY = std::min(minY, std::min(a.y, b.y));
