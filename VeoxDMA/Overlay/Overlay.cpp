@@ -221,6 +221,42 @@ bool KeyJustPressed(int vk)
 	return pressed;
 }
 
+static const int kMenuKeyVk[] = {
+	VK_INSERT, // 0: Insert
+	VK_HOME,   // 1: Home
+	VK_DELETE, // 2: Delete
+	VK_END,    // 3: End
+	VK_F11,    // 4: F11
+	VK_F12,    // 5: F12
+	VK_RSHIFT  // 6: Right Shift
+};
+
+static const int kPanicKeyVk[] = {
+	0,         // 0: None
+	VK_END,    // 1: End
+	VK_F8,     // 2: F8
+	VK_F9,     // 3: F9
+	VK_F10,    // 4: F10
+	VK_F11,    // 5: F11
+	VK_F12     // 6: F12
+};
+
+static int GetMenuKeyVk()
+{
+	int idx = ConfigInstance.Overlay.MenuKey;
+	if (idx >= 0 && idx < (int)(sizeof(kMenuKeyVk) / sizeof(kMenuKeyVk[0])))
+		return kMenuKeyVk[idx];
+	return VK_INSERT;
+}
+
+static int GetPanicKeyVk()
+{
+	int idx = ConfigInstance.Overlay.PanicKey;
+	if (idx >= 0 && idx < (int)(sizeof(kPanicKeyVk) / sizeof(kPanicKeyVk[0])))
+		return kPanicKeyVk[idx];
+	return 0;
+}
+
 void DrawFps()
 {
 	if (!ConfigInstance.Overlay.FPSEnabled) return;
@@ -298,6 +334,22 @@ void SetMenuOpen(bool open)
 }
 
 void ToggleMenu() { SetMenuOpen(!g_menuOpen); }
+
+bool PanicActive()
+{
+	return ConfigInstance.Overlay.PanicMode;
+}
+
+void TogglePanic()
+{
+	ConfigInstance.Overlay.PanicMode = !ConfigInstance.Overlay.PanicMode;
+	if (ConfigInstance.Overlay.PanicMode) {
+		SetMenuOpen(false);
+		Notify("PANIC: Visuals & Aim Suspended", 0xFF3333FFu, 2.5f);
+	} else {
+		Notify("PANIC: Resumed", 0x33FF33FFu, 2.0f);
+	}
+}
 
 bool Transparent() { return g_transparent; }
 
@@ -477,8 +529,14 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 			continue;
 		}
 
-		if (KeyJustPressed(VK_INSERT))
+		const int menuVk = GetMenuKeyVk();
+		if (KeyJustPressed(menuVk))
 			ToggleMenu();
+
+		const int panicVk = GetPanicKeyVk();
+		if (panicVk > 0 && KeyJustPressed(panicVk))
+			TogglePanic();
+
 #ifdef _DEBUG
 		if (KeyJustPressed(VK_DELETE))
 			g_debugVisible = !g_debugVisible;
@@ -493,10 +551,17 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 		ImGui_ImplWin32_NewFrame();
 		ImGui::NewFrame();
 
-		DrawFps();
-		if (callbacks.draw) callbacks.draw();
-		OverlayNotify::Draw();
-		DrawDebugOverlay();
+		if (!ConfigInstance.Overlay.PanicMode)
+		{
+			DrawFps();
+			if (callbacks.draw) callbacks.draw();
+			OverlayNotify::Draw();
+			DrawDebugOverlay();
+		}
+		else
+		{
+			OverlayNotify::Draw();
+		}
 
 		ImGui::Render();
 

@@ -80,6 +80,21 @@ public:
 	D2D1::ColorF ChamsOutlineColour = Colour(200, 180, 255);
 	float ChamsScale = 1.0f;
 	bool Skeleton = true;
+
+	// Target Tracers / Snaplines
+	bool Snaplines = false;
+	int SnaplineOrigin = 0; // 0 = Bottom Center, 1 = Screen Center, 2 = Top Center
+	D2D1::ColorF SnaplineColour = Colour(255, 255, 255);
+
+	// Off-Screen Directional Indicator Arrows
+	bool OffscreenArrows = false;
+	float OffscreenRadius = 350.f;
+	D2D1::ColorF OffscreenColour = Colour(255, 70, 70);
+
+	// Head Hitbox Dot
+	bool HeadDot = false;
+	float HeadDotRadius = 3.5f;
+	D2D1::ColorF HeadDotColour = Colour(255, 50, 50);
     void ToJsonColour(json* j, const std::string& name, D2D1::ColorF* colour)
     {
         (*j)[ConfigName][name][LIT("r")] = colour->r;
@@ -153,6 +168,15 @@ public:
         ToJsonColour(&j, LIT("ChamsOutlineColour"), &ChamsOutlineColour);
         j[ConfigName][LIT("ChamsScale")] = ChamsScale;
         j[ConfigName][LIT("Skeleton")] = Skeleton;
+        j[ConfigName][LIT("Snaplines")] = Snaplines;
+        j[ConfigName][LIT("SnaplineOrigin")] = SnaplineOrigin;
+        ToJsonColour(&j, LIT("SnaplineColour"), &SnaplineColour);
+        j[ConfigName][LIT("OffscreenArrows")] = OffscreenArrows;
+        j[ConfigName][LIT("OffscreenRadius")] = OffscreenRadius;
+        ToJsonColour(&j, LIT("OffscreenColour"), &OffscreenColour);
+        j[ConfigName][LIT("HeadDot")] = HeadDot;
+        j[ConfigName][LIT("HeadDotRadius")] = HeadDotRadius;
+        ToJsonColour(&j, LIT("HeadDotColour"), &HeadDotColour);
 
         return j;
     }
@@ -211,6 +235,15 @@ public:
         FromJsonColour(j, LIT("ChamsOutlineColour"), &ChamsOutlineColour);
         ChamsScale = j[ConfigName].value(LIT("ChamsScale"), ChamsScale);
         Skeleton = j[ConfigName].value(LIT("Skeleton"), Skeleton);
+        Snaplines = j[ConfigName].value(LIT("Snaplines"), Snaplines);
+        SnaplineOrigin = j[ConfigName].value(LIT("SnaplineOrigin"), SnaplineOrigin);
+        FromJsonColour(j, LIT("SnaplineColour"), &SnaplineColour);
+        OffscreenArrows = j[ConfigName].value(LIT("OffscreenArrows"), OffscreenArrows);
+        OffscreenRadius = j[ConfigName].value(LIT("OffscreenRadius"), OffscreenRadius);
+        FromJsonColour(j, LIT("OffscreenColour"), &OffscreenColour);
+        HeadDot = j[ConfigName].value(LIT("HeadDot"), HeadDot);
+        HeadDotRadius = j[ConfigName].value(LIT("HeadDotRadius"), HeadDotRadius);
+        FromJsonColour(j, LIT("HeadDotColour"), &HeadDotColour);
     }
 };
 

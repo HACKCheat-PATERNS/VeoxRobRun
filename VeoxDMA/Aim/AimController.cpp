@@ -790,6 +790,13 @@ void Tick()
         g_lastTarget = -1;
         return;
     }
+    if (ConfigInstance.Overlay.PanicMode) {
+        g_debug.reason = "panic active";
+        stopAiming();
+        resetSmoothing();
+        g_lastTarget = -1;
+        return;
+    }
     if (Overlay::MenuOpen()) {
         g_debug.reason = "menu open";
         stopAiming();
@@ -887,13 +894,23 @@ void Tick()
         if (haveLocalPosition &&
             Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) continue;
 
-        Vector3 point = BonePoint(ent, cfg.TargetBone);
+        int activeBone = cfg.TargetBone;
+        if (cfg.DynamicBoneFallback) {
+            // Drop to chest (bone 2) if low health or head occluded
+            if (ent.healthKnown && ent.health <= 40.f) {
+                activeBone = 2;
+            } else if (RobRunReader::GetBvhStatus().loaded && RobRunReader::IsCameraOccluded(BonePoint(ent, activeBone))) {
+                activeBone = 2;
+            }
+        }
+
+        Vector3 point = BonePoint(ent, activeBone);
         if (cfg.VisibleBonesOnly && RobRunReader::GetBvhStatus().loaded) {
             if (RobRunReader::IsCameraOccluded(point)) {
                 bool altFound = false;
                 static const int altBones[] = { 0, 1, 2, 3 }; // Head, Neck, Chest, Pelvis
                 for (int b : altBones) {
-                    if (b == cfg.TargetBone) continue;
+                    if (b == activeBone) continue;
                     Vector3 altPoint = BonePoint(ent, b);
                     if (!RobRunReader::IsCameraOccluded(altPoint)) {
                         point = altPoint;
@@ -948,6 +965,14 @@ void Tick()
         }
 
         float score = distance;
+        if (cfg.TargetPriority == 1) {
+            // 3D Proximity
+            score = haveLocalPosition ? Distance(ent.position, snapshot->localPosition) : distance;
+        } else if (cfg.TargetPriority == 2) {
+            // Lowest Health finish priority
+            score = (ent.healthKnown && ent.health > 0.f) ? ent.health : (10000.f + distance);
+        }
+
         if (ent.entityId == g_lastTarget) score *= 0.75f;
         if (!found || score < bestScore) {
             found = true;

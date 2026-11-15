@@ -341,6 +341,48 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 	}
 }
 
+static void DrawOffscreenArrow(ImDrawList* dl, int screenW, int screenH,
+	const Vector3& targetPos, const RobRunCamera::CameraState& cam,
+	float distMeters, ImU32 color, ImFont* font, float fontSize)
+{
+	const float cx = (float)screenW * 0.5f;
+	const float cy = (float)screenH * 0.5f;
+	Vector3 toTarget = targetPos - cam.position;
+	const float toTargetLen = toTarget.Length();
+	if (toTargetLen < 0.001f) return;
+	toTarget = toTarget / toTargetLen;
+
+	float x = Vector3::Dot(toTarget, cam.right);
+	float y = Vector3::Dot(toTarget, cam.up);
+	float z = Vector3::Dot(toTarget, cam.forward);
+
+	if (z < 0.f) {
+		x = -x;
+		y = -y;
+	}
+
+	const float angle = std::atan2(-y, x);
+	const float radius = std::min(cx, cy) * 0.82f;
+	const ImVec2 arrowPos(cx + std::cos(angle) * radius, cy + std::sin(angle) * radius);
+
+	constexpr float arrowLen = 14.f;
+	constexpr float arrowWidth = 9.f;
+	const ImVec2 tip = arrowPos;
+	const ImVec2 baseCenter(arrowPos.x - std::cos(angle) * arrowLen, arrowPos.y - std::sin(angle) * arrowLen);
+	const ImVec2 normal(-std::sin(angle), std::cos(angle));
+	const ImVec2 left(baseCenter.x + normal.x * arrowWidth * 0.5f, baseCenter.y + normal.y * arrowWidth * 0.5f);
+	const ImVec2 right(baseCenter.x - normal.x * arrowWidth * 0.5f, baseCenter.y - normal.y * arrowWidth * 0.5f);
+
+	dl->AddTriangleFilled(tip, left, right, color);
+	dl->AddTriangle(tip, left, right, IM_COL32(0, 0, 0, 200), 1.2f);
+
+	char distBuf[16];
+	std::snprintf(distBuf, sizeof(distBuf), "%.0fm", distMeters);
+	ImVec2 txtSz = font ? font->CalcTextSizeA(fontSize - 2.f, FLT_MAX, 0.f, distBuf) : ImGui::CalcTextSize(distBuf);
+	ImVec2 txtPos(arrowPos.x - txtSz.x * 0.5f, arrowPos.y + (std::sin(angle) >= 0.f ? 8.f : -8.f - txtSz.y));
+	Esp::DrawOutlinedText(dl, txtPos, color, font, fontSize - 2.f, distBuf);
+}
+
 void DrawPlayers()
 {
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
@@ -411,13 +453,26 @@ void DrawPlayers()
 		}
 
 		ImVec2 screenPos{};
-		if (!Project(viewProjection, entPos, screenW, screenH, screenPos))
-			continue;
+		const bool projected = Project(viewProjection, entPos, screenW, screenH, screenPos);
+		const bool onScreen = projected &&
+			screenPos.x >= 0.f && screenPos.x <= (float)screenW &&
+			screenPos.y >= 0.f && screenPos.y <= (float)screenH;
 
-		// Peripheral off-screen filter: skip entities far outside visible screen
-		if (screenPos.x < -300.f || screenPos.x > (float)screenW + 300.f ||
-			screenPos.y < -300.f || screenPos.y > (float)screenH + 300.f)
+		if (!onScreen)
+		{
+			if (pcfg.OffscreenArrows && snapshot->camera.valid)
+			{
+				ImU32 offCol = Esp::D2DColorToImU32(pcfg.OffscreenColour);
+				if (pcfg.VisCheck || pcfg.WallCheck) {
+					offCol = ent.visible
+						? Esp::D2DColorToImU32(pcfg.VisibleColour)
+						: Esp::D2DColorToImU32(pcfg.HiddenColour);
+				}
+				DrawOffscreenArrow(dl, screenW, screenH, entPos, snapshot->camera,
+					distF, offCol, font, fontSize);
+			}
 			continue;
+		}
 
 		// --- chams ---
 		if (pcfg.Chams)
@@ -497,6 +552,56 @@ void DrawPlayers()
 					ImVec2(barX + 3.f, maxY + 4.f), IM_COL32(0, 0, 0, 180));
 				dl->AddRectFilled(ImVec2(barX, maxY + 4.f - (maxY - minY + 8.f) * pct),
 					ImVec2(barX + 3.f, maxY + 4.f), barCol);
+
+				char hpNum[16];
+				std::snprintf(hpNum, sizeof(hpNum), "%.0f", ent.health);
+				ImVec2 numSz = font ? font->CalcTextSizeA(fontSize - 2.f, FLT_MAX, 0.f, hpNum) : ImGui::CalcTextSize(hpNum);
+				Esp::DrawOutlinedText(dl, ImVec2(barX - numSz.x - 2.f, maxY - numSz.y),
+					barCol, font, fontSize - 2.f, hpNum);
+			}
+		}
+
+		// --- snaplines ---
+		if (pcfg.Snaplines)
+		{
+			ImVec2 origin(screenW * 0.5f, (float)screenH);
+			if (pcfg.SnaplineOrigin == 1) {
+				origin = ImVec2(screenW * 0.5f, screenH * 0.5f);
+			} else if (pcfg.SnaplineOrigin == 2) {
+				origin = ImVec2(screenW * 0.5f, 0.f);
+			}
+
+			const ImVec2 snapTarget = boxValid
+				? ImVec2((minX + maxX) * 0.5f, maxY + 4.f)
+				: screenPos;
+
+			ImU32 snapCol = Esp::D2DColorToImU32(pcfg.SnaplineColour);
+			if (pcfg.VisCheck || pcfg.WallCheck) {
+				snapCol = ent.visible
+					? Esp::D2DColorToImU32(pcfg.VisibleColour)
+					: Esp::D2DColorToImU32(pcfg.HiddenColour);
+			}
+			dl->AddLine(origin, snapTarget, snapCol, 1.2f);
+		}
+
+		// --- head dot ---
+		if (pcfg.HeadDot)
+		{
+			Vector3 headPos = ent.bonePoints.hasHead && IsValidBone(ent.bonePoints.head, entPos)
+				? ent.bonePoints.head
+				: Vector3(entPos.x, entPos.y + 1.70f, entPos.z);
+
+			ImVec2 headScreen{};
+			if (Project(viewProjection, headPos, screenW, screenH, headScreen))
+			{
+				ImU32 headCol = Esp::D2DColorToImU32(pcfg.HeadDotColour);
+				if (pcfg.VisCheck || pcfg.WallCheck) {
+					headCol = ent.visible
+						? Esp::D2DColorToImU32(pcfg.VisibleColour)
+						: Esp::D2DColorToImU32(pcfg.HiddenColour);
+				}
+				dl->AddCircleFilled(headScreen, pcfg.HeadDotRadius, headCol);
+				dl->AddCircle(headScreen, pcfg.HeadDotRadius, IM_COL32(0, 0, 0, 180), 0, 1.0f);
 			}
 		}
 

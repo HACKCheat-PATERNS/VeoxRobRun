@@ -65,6 +65,9 @@ public:
 	// HUD are suppressed). Toggled by BattleModeKey.
 	bool BattleMode = false;
 	int BattleModeKey = 0;           // index into Aim::KeyNames()
+	int MenuKey = 0;                 // 0=Insert, 1=Home, 2=Delete, 3=End, 4=F11, 5=F12, 6=Right Shift
+	bool PanicMode = false;          // true = immediately blank overlay & stop targeting
+	int PanicKey = 0;                // 0=None, 1=End, 2=F8, 3=F9, 4=F10, 5=F11, 6=F12
 	D2D1::ColorF BackgroundColour = Colour(0, 0, 0);
 
 	// Saved screen placements. The menu and radar remember size as well as
@@ -108,6 +111,9 @@ public:
 		j[ConfigName][LIT("BackdropHeight")] = BackdropHeight;
 		j[ConfigName][LIT("BattleMode")] = BattleMode;
 		j[ConfigName][LIT("BattleModeKey")] = BattleModeKey;
+		j[ConfigName][LIT("MenuKey")] = MenuKey;
+		j[ConfigName][LIT("PanicMode")] = PanicMode;
+		j[ConfigName][LIT("PanicKey")] = PanicKey;
 		j[ConfigName][LIT("FontName")] = FontName;
 		j[ConfigName][LIT("MenuWindow")] = MenuWindow.ToJson();
 		j[ConfigName][LIT("RadarWindow")] = RadarWindow.ToJson();
@@ -134,6 +140,9 @@ public:
 		BackdropHeight = s.value(LIT("BackdropHeight"), BackdropHeight);
 		BattleMode = s.value(LIT("BattleMode"), BattleMode);
 		BattleModeKey = s.value(LIT("BattleModeKey"), BattleModeKey);
+		MenuKey = s.value(LIT("MenuKey"), MenuKey);
+		PanicMode = s.value(LIT("PanicMode"), PanicMode);
+		PanicKey = s.value(LIT("PanicKey"), PanicKey);
 		FontName = s.value(LIT("FontName"), FontName);
 		if (s.contains(LIT("MenuWindow")))
 			MenuWindow.FromJson(s[LIT("MenuWindow")]);

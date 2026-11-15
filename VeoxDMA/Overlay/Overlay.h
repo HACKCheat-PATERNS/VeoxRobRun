@@ -26,6 +26,9 @@ bool MenuOpen();
 void SetMenuOpen(bool open);
 void ToggleMenu();
 
+bool PanicActive();
+void TogglePanic();
+
 bool Transparent();
 void SetTransparent(bool on);
 

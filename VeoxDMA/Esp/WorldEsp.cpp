@@ -180,6 +180,12 @@ void DrawWorldEntities()
 		if (haveLocalPosition && distance > ConfigInstance.World.MaxDistance)
 			continue;
 
+		if (ConfigInstance.World.MinValueFilter > 0)
+		{
+			if (entity.hasCashAmount && entity.cashAmount < ConfigInstance.World.MinValueFilter)
+				continue;
+		}
+
 		Vector2 screen;
 		if (!RobRunReader::ProjectWorld(
 			viewProjection, entity.position, screenW, screenH, screen))

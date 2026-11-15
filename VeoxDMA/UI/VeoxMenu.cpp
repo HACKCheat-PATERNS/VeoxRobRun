@@ -966,12 +966,22 @@ void DrawVisuals()
 
 	ImGui::BeginGroup();
 	{
-		if (MatchAny({ "Box ESP", "Health", "Distance" }))
+		if (MatchAny({ "Box ESP", "Health", "Distance", "Snaplines", "Off-Screen Indicators", "Head Dot" }))
 		{
 			BeginCard("PLAYER ESP", kCardW);
 			ColorToggleRow("Box ESP", &ConfigInstance.Player.BoxEsp, ConfigInstance.Player.BoxColour);
 			ColorToggleRow("Health", &ConfigInstance.Player.Health, ConfigInstance.Player.HealthTextColour);
 			ColorToggleRow("Distance", &ConfigInstance.Player.Distance, ConfigInstance.Player.DistanceColour);
+			ColorToggleRow("Snaplines", &ConfigInstance.Player.Snaplines, ConfigInstance.Player.SnaplineColour);
+			if (ConfigInstance.Player.Snaplines) {
+				static const char* snapOrigins[] = { "Bottom", "Crosshair", "Top" };
+				ComboRow("Origin", &ConfigInstance.Player.SnaplineOrigin, snapOrigins, IM_ARRAYSIZE(snapOrigins));
+			}
+			ColorToggleRow("Off-Screen Indicators", &ConfigInstance.Player.OffscreenArrows, ConfigInstance.Player.OffscreenColour);
+			ColorToggleRow("Head Hitbox Dot", &ConfigInstance.Player.HeadDot, ConfigInstance.Player.HeadDotColour);
+			if (ConfigInstance.Player.HeadDot) {
+				SliderFloatRow("Dot Radius", &ConfigInstance.Player.HeadDotRadius, 1.5f, 8.0f, "px");
+			}
 			EndCard();
 		}
 
@@ -1133,6 +1143,7 @@ void DrawVisuals()
 			ToggleRow("Crypto Workbenches", &ConfigInstance.World.CryptoWorkbenches);
 			ToggleRow("Vehicle Trunks", &ConfigInstance.World.VehicleTrunks);
 			SliderIntRow("Max Distance", &ConfigInstance.World.MaxDistance, 0, 2000, "m");
+			SliderIntRow("Min Cash / Value", &ConfigInstance.World.MinValueFilter, 0, 50000, " $");
 			SliderIntRow("Font Size", &ConfigInstance.World.FontSize, 1, 24, "px");
 			ToggleRow("Instant Loot", &ConfigInstance.World.InstantLoot);
 			EndCard();
@@ -1260,6 +1271,11 @@ void DrawAim()
 
 		static const char* bones[] = { "Head", "Neck", "Chest", "Pelvis" };
 		ComboRow("Target Bone", &ConfigInstance.Aim.TargetBone, bones, IM_ARRAYSIZE(bones));
+
+		static const char* priorities[] = { "Crosshair FOV", "3D Distance", "Lowest Health" };
+		ComboRow("Target Priority", &ConfigInstance.Aim.TargetPriority, priorities, IM_ARRAYSIZE(priorities));
+
+		ToggleRow("Dynamic Bone Fallback", &ConfigInstance.Aim.DynamicBoneFallback);
 
 		ComboRow("Aim Key", &ConfigInstance.Aim.AimKey, Aim::KeyNames(), Aim::KeyCount());
 		EndCard();
@@ -2019,6 +2035,15 @@ void DrawSettings(bool attached, const std::string& statusText)
 		bool onTop = Overlay::AlwaysOnTop();
 		if (ToggleRow("Always On Top", &onTop))
 			Overlay::SetAlwaysOnTop(onTop);
+
+		static const char* menuKeys[] = { "Insert", "Home", "Delete", "End", "F11", "F12", "Right Shift" };
+		ComboRow("Menu Key", &ConfigInstance.Overlay.MenuKey, menuKeys, IM_ARRAYSIZE(menuKeys));
+
+		ToggleRow("Panic Mode", &ConfigInstance.Overlay.PanicMode);
+		static const char* panicKeys[] = { "Off", "End", "F8", "F9", "F10", "F11", "F12" };
+		ComboRow("Panic Key", &ConfigInstance.Overlay.PanicKey, panicKeys, IM_ARRAYSIZE(panicKeys));
+		if (ConfigInstance.Overlay.PanicKey > 0)
+			Note("Pressing panic key instantly blanks the overlay and stops targeting.");
 
 		ToggleRow("High Contrast Menu", &ConfigInstance.Overlay.HighContrastMenu);
 		Note("Solid card fills and brighter text, for bright game scenes.");

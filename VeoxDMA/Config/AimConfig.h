@@ -24,6 +24,8 @@ public:
 	bool Enabled = false;
 	int AimType = 0;        // 0 = Memory Aim, 1 = Hardware Aim
 	int TargetBone = 0;     // 0 = Head, 1 = Neck, 2 = Chest, 3 = Pelvis
+	int TargetPriority = 0; // 0 = Crosshair FOV, 1 = 3D Distance, 2 = Lowest Health
+	bool DynamicBoneFallback = false; // drop to chest if head is occluded or low health
 	int Smoothness = 6;     // 1 (instant) .. 100 (very slow)
 	// Hardware Aim only: multiplies the pixel error before it is sent to the
 	// device, so a low in-game sensitivity (where one mouse count travels less
@@ -87,6 +89,8 @@ public:
 		j[ConfigName][LIT("Enabled")] = Enabled;
 		j[ConfigName][LIT("AimType")] = AimType;
 		j[ConfigName][LIT("TargetBone")] = TargetBone;
+		j[ConfigName][LIT("TargetPriority")] = TargetPriority;
+		j[ConfigName][LIT("DynamicBoneFallback")] = DynamicBoneFallback;
 		j[ConfigName][LIT("Smoothness")] = Smoothness;
 		j[ConfigName][LIT("HardwareGain")] = HardwareGain;
 		j[ConfigName][LIT("Fov")] = Fov;
@@ -128,6 +132,8 @@ public:
 		Enabled = j[ConfigName].value(LIT("Enabled"), Enabled);
 		AimType = j[ConfigName].value(LIT("AimType"), AimType);
 		TargetBone = j[ConfigName].value(LIT("TargetBone"), TargetBone);
+		TargetPriority = j[ConfigName].value(LIT("TargetPriority"), TargetPriority);
+		DynamicBoneFallback = j[ConfigName].value(LIT("DynamicBoneFallback"), DynamicBoneFallback);
 		Smoothness = j[ConfigName].value(LIT("Smoothness"), Smoothness);
 		HardwareGain = j[ConfigName].value(LIT("HardwareGain"), HardwareGain);
 		Fov = j[ConfigName].value(LIT("Fov"), Fov);

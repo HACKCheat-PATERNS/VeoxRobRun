@@ -22,6 +22,7 @@ public:
 	bool ShowDistance = true;
 	int MaxDistance = 600;
 	int FontSize = 10;
+	int MinValueFilter = 0;
 
 	bool InstantLoot = false;
 
@@ -119,6 +120,7 @@ public:
 		j[ConfigName][LIT("ShowDistance")] = ShowDistance;
 		j[ConfigName][LIT("MaxDistance")] = MaxDistance;
 		j[ConfigName][LIT("FontSize")] = FontSize;
+		j[ConfigName][LIT("MinValueFilter")] = MinValueFilter;
 		j[ConfigName][LIT("InstantLoot")] = InstantLoot;
 
 		ToJsonBool(&j, LIT("LootNodes"), LootNodes);
@@ -185,6 +187,7 @@ public:
 		ShowDistance = j[ConfigName].value(LIT("ShowDistance"), ShowDistance);
 		MaxDistance = j[ConfigName].value(LIT("MaxDistance"), MaxDistance);
 		FontSize = j[ConfigName].value(LIT("FontSize"), FontSize);
+		MinValueFilter = j[ConfigName].value(LIT("MinValueFilter"), MinValueFilter);
 		InstantLoot = j[ConfigName].value(LIT("InstantLoot"), InstantLoot);
 
 		FromJsonBool(j, LIT("LootNodes"), &LootNodes);
