@@ -172,6 +172,12 @@ struct DetailCacheEntry {
     bool isFiring = false;
     bool isReloading = false;
     bool hasArmor = false;
+    float armor = 0.f;
+    float stamina = -1.f;
+    std::int32_t bagValue = 0;
+    std::int32_t bagCash = 0;
+    std::int32_t bagItems = 0;
+    std::int32_t equipValue = 0;
     bool isKnockedDown = false;
     bool isKnockedOut = false;
     bool isSurrendered = false;
@@ -2294,6 +2300,8 @@ static void UpdateInternal()
                 detail.maxHealth = scratch.maxHealth;
                 detail.criticalHealth = scratch.criticalHealth;
                 detail.healthKnown = scratch.healthKnown;
+                detail.armor = scratch.armor;
+                detail.stamina = scratch.stamina;
 
                 scratch.isDead = detail.isDead;
                 ReadRoleAndVehicle(w.characterModel, scratch);
@@ -2324,6 +2332,24 @@ static void UpdateInternal()
                     detail.clanTag = std::move(scratch.clanTag);
                     detail.publicId = scratch.publicId;
                 }
+
+                const std::uintptr_t costModel = ReadPtr(
+                    w.characterModel + rr::BattleCharacterModel::RobberInventoryCost);
+                if (costModel > 0x10000) {
+                    struct CostBlock {
+                        std::int32_t characterInventory;
+                        std::int32_t vehicleInventory;
+                        std::int32_t characterEquip;
+                        std::int32_t characterInventoryCash;
+                        std::int32_t characterInventoryItems;
+                    } costs{};
+                    if (RobRunMemory::ReadBytes(costModel + rr::RobberInventoryCostModel::CharacterInventory, &costs, sizeof(costs))) {
+                        detail.bagValue = costs.characterInventory;
+                        detail.bagCash = costs.characterInventoryCash;
+                        detail.bagItems = costs.characterInventoryItems;
+                        detail.equipValue = costs.characterEquip;
+                    }
+                }
             }
 
             entity.isDead = detail.isDead;
@@ -2346,6 +2372,12 @@ static void UpdateInternal()
             entity.isFiring = detail.isFiring;
             entity.isReloading = detail.isReloading;
             entity.hasArmor = detail.hasArmor;
+            entity.armor = detail.armor;
+            entity.stamina = detail.stamina;
+            entity.bagValue = detail.bagValue;
+            entity.bagCash = detail.bagCash;
+            entity.bagItems = detail.bagItems;
+            entity.equipValue = detail.equipValue;
             entity.isKnockedDown = detail.isKnockedDown;
             entity.isKnockedOut = detail.isKnockedOut;
             entity.isSurrendered = detail.isSurrendered;

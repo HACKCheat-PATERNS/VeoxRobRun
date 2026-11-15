@@ -46,6 +46,10 @@ struct EntityData {
     bool hasArmor = false;
     float armor = 0.f;
     float stamina = -1.f;
+    std::int32_t bagValue = 0;
+    std::int32_t bagCash = 0;
+    std::int32_t bagItems = 0;
+    std::int32_t equipValue = 0;
     bool isAimingAtLocal = false;
     bool isKnockedDown = false;
     bool isKnockedOut = false;

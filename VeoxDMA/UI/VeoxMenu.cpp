@@ -3,6 +3,7 @@
 #include "ConfigInstance.h"
 #include "ConfigFile.h"
 #include "RobRunReader.h"
+#include "RobRunMemory.h"
 #include "DeviceSession.h"
 #include "InputManager.h"
 #include "../Aim/AimController.h"
@@ -156,7 +157,7 @@ bool g_placementApplied = false;
 char g_search[96] = "";
 bool g_readCatalog = false;
 
-const char* kPageNames[] = { "Visuals", "Radar", "Aim", "Misc", "Settings" };
+const char* kPageNames[] = { "Visuals", "Radar", "Aim", "Server", "Misc", "Settings" };
 constexpr int kPageCount = IM_ARRAYSIZE(kPageNames);
 
 ID3D11ShaderResourceView* g_icon[kPageCount] = {};
@@ -1443,6 +1444,420 @@ void DrawAim()
 	ConfigInstance.Aim.FerrumController = ferrumController;
 }
 
+static std::string FormatMoney(std::int32_t amount)
+{
+	if (amount <= 0) return "$0";
+	std::string s = std::to_string(amount);
+	int n = static_cast<int>(s.length()) - 3;
+	while (n > 0) {
+		s.insert(n, ",");
+		n -= 3;
+	}
+	return "$" + s;
+}
+
+static std::string FormatDistance(float meters)
+{
+	if (meters < 0.01f) return "0 m (You)";
+	char buf[32];
+	std::snprintf(buf, sizeof(buf), "%.1f m", meters);
+	return buf;
+}
+
+void DrawServer()
+{
+	const auto snapshot = RobRunReader::GetSnapshot();
+	if (!snapshot)
+	{
+		BeginCard("SERVER", kCardW);
+		Note("No reader snapshot available.");
+		EndCard();
+		return;
+	}
+
+	if (!g_singleColumn)
+	{
+		const float r1 = ImMax(CardNaturalHeight("SERVER STATS"), CardNaturalHeight("ROSTER CONTROLS"));
+		ForceCardHeight("SERVER STATS", r1);
+		ForceCardHeight("ROSTER CONTROLS", r1);
+	}
+
+	static char serverSearch[64] = "";
+	static int currentSort = 0;
+	static bool filterAliveOnly = false;
+	static bool filterExcludeParty = false;
+	static bool filterExcludeSelf = false;
+
+	int totalCount = 0;
+	int aliveCount = 0;
+	int deadCount = 0;
+	int partyCount = 0;
+	int64_t totalServerBagValue = 0;
+	int64_t totalServerCash = 0;
+
+	Vector3 effectiveLocalPos = snapshot->localPosition;
+	if (effectiveLocalPos.IsZero() && snapshot->localEntityId >= 0)
+	{
+		for (const auto& ent : snapshot->entities)
+		{
+			if (ent.entityId == snapshot->localEntityId && !ent.position.IsZero())
+			{
+				effectiveLocalPos = ent.position;
+				break;
+			}
+		}
+	}
+
+	struct PlayerItem {
+		const RobRunReader::EntityData* ent = nullptr;
+		float distance = 0.f;
+		std::string name;
+		std::string clan;
+		std::string weapon;
+		bool isLocal = false;
+	};
+
+	std::vector<PlayerItem> items;
+	items.reserve(snapshot->entities.size());
+
+	for (const auto& ent : snapshot->entities)
+	{
+		totalCount++;
+		if (ent.isDead) deadCount++;
+		else aliveCount++;
+
+		if (ent.isPartyMember) partyCount++;
+
+		totalServerBagValue += ent.bagValue;
+		totalServerCash += ent.bagCash;
+
+		PlayerItem item;
+		item.ent = &ent;
+		item.isLocal = (ent.entityId == snapshot->localEntityId);
+
+		if (item.isLocal)
+		{
+			item.distance = 0.f;
+		}
+		else if (!effectiveLocalPos.IsZero() && !ent.position.IsZero())
+		{
+			const float dx = ent.position.x - effectiveLocalPos.x;
+			const float dy = ent.position.y - effectiveLocalPos.y;
+			const float dz = ent.position.z - effectiveLocalPos.z;
+			item.distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+		}
+		else
+		{
+			item.distance = 9999.f;
+		}
+
+		item.name = RobRunMemory::WideToUtf8(ent.nickname);
+		if (item.name.empty())
+		{
+			item.name = item.isLocal ? "Local Player" : ("Player #" + std::to_string(ent.entityId));
+		}
+		item.clan = RobRunMemory::WideToUtf8(ent.clanTag);
+		item.weapon = RobRunMemory::WideToUtf8(ent.weaponName);
+		if (item.weapon.empty()) item.weapon = "None";
+
+		if (filterAliveOnly && ent.isDead) continue;
+		if (filterExcludeParty && ent.isPartyMember && !item.isLocal) continue;
+		if (filterExcludeSelf && item.isLocal) continue;
+
+		if (serverSearch[0])
+		{
+			std::string needle(serverSearch);
+			std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+
+			std::string hay = item.name + " " + item.clan + " " + ent.roleName + " " + item.weapon;
+			std::transform(hay.begin(), hay.end(), hay.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+
+			if (hay.find(needle) == std::string::npos) continue;
+		}
+
+		items.push_back(std::move(item));
+	}
+
+	const char* sortModes[] = {
+		"Distance (Nearest)",
+		"Bag Value (Highest)",
+		"Carried Cash (Highest)",
+		"Health (Lowest)",
+		"Name (A-Z)"
+	};
+
+	switch (currentSort)
+	{
+	case 0:
+		std::sort(items.begin(), items.end(), [](const PlayerItem& a, const PlayerItem& b) {
+			if (a.isLocal != b.isLocal) return a.isLocal;
+			return a.distance < b.distance;
+		});
+		break;
+	case 1:
+		std::sort(items.begin(), items.end(), [](const PlayerItem& a, const PlayerItem& b) {
+			return a.ent->bagValue > b.ent->bagValue;
+		});
+		break;
+	case 2:
+		std::sort(items.begin(), items.end(), [](const PlayerItem& a, const PlayerItem& b) {
+			return a.ent->bagCash > b.ent->bagCash;
+		});
+		break;
+	case 3:
+		std::sort(items.begin(), items.end(), [](const PlayerItem& a, const PlayerItem& b) {
+			return a.ent->health < b.ent->health;
+		});
+		break;
+	case 4:
+		std::sort(items.begin(), items.end(), [](const PlayerItem& a, const PlayerItem& b) {
+			return a.name < b.name;
+		});
+		break;
+	default: break;
+	}
+
+	ImGui::BeginGroup();
+	{
+		BeginCard("SERVER STATS", kCardW);
+		Note("Total Players: %d  (%d alive, %d dead)", totalCount, aliveCount, deadCount);
+		if (partyCount > 0)
+			Note("Party Members: %d", partyCount);
+		Note("Total Server Bag: %s", FormatMoney((std::int32_t)totalServerBagValue).c_str());
+		Note("Total Server Cash: %s", FormatMoney((std::int32_t)totalServerCash).c_str());
+		if (snapshot->spectatorAlert || snapshot->observerCount > 0)
+			Note("Spectators: %d active", snapshot->observerCount);
+		EndCard();
+	}
+	ImGui::EndGroup();
+
+	if (!g_singleColumn)
+		ImGui::SameLine(0.f, kGap);
+
+	ImGui::BeginGroup();
+	{
+		BeginCard("ROSTER CONTROLS", kCardW);
+		SectionLabel("FILTER & SORT");
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+		ImGui::InputTextWithHint("##srv_search", "Filter name, clan, weapon...", serverSearch, sizeof(serverSearch));
+		ComboRow("Sort Order", &currentSort, sortModes, IM_ARRAYSIZE(sortModes));
+		ToggleRow("Alive Players Only", &filterAliveOnly);
+		ToggleRow("Hide Party Members", &filterExcludeParty);
+		ToggleRow("Hide Self", &filterExcludeSelf);
+		EndCard();
+	}
+	ImGui::EndGroup();
+
+	const float fullW = g_singleColumn ? kCardW : (kCardW * 2.f + kGap);
+	char rosterTitle[64];
+	std::snprintf(rosterTitle, sizeof(rosterTitle), "PLAYERS ON MAP (%d / %d)", (int)items.size(), totalCount);
+	BeginCard(rosterTitle, fullW);
+
+	if (items.empty())
+	{
+		if (totalCount == 0)
+			Note("No player entities detected on the map. Connect to a match or attach DMA reader.");
+		else
+			Note("No players match the current search filter.");
+	}
+	else
+	{
+		ImGuiWindow* window = ImGui::GetCurrentWindow();
+		ImDrawList* dl = window->DrawList;
+
+		for (size_t idx = 0; idx < items.size(); ++idx)
+		{
+			const auto& item = items[idx];
+			const auto& ent = *item.ent;
+
+			const float rowH = 48.f;
+			const ImVec2 p = window->DC.CursorPos;
+			const float w = ImGui::GetContentRegionAvail().x;
+			const ImRect bb(p, p + ImVec2(w, rowH));
+
+			ImGui::ItemSize(bb);
+			const ImGuiID rowId = window->GetID((int)idx + 2000);
+			if (!ImGui::ItemAdd(bb, rowId)) continue;
+
+			const bool hov = ImGui::IsMouseHoveringRect(bb.Min, bb.Max);
+
+			if (item.isLocal)
+			{
+				dl->AddRectFilled(bb.Min, bb.Max, C(kAccent, 0.15f), 6.f);
+				dl->AddRect(bb.Min, bb.Max, C(kAccent, 0.50f), 6.f, 0, 1.2f);
+			}
+			else if (ent.isAimingAtLocal)
+			{
+				dl->AddRectFilled(bb.Min, bb.Max, C(kRed, 0.14f), 6.f);
+				dl->AddRect(bb.Min, bb.Max, C(kRed, 0.45f), 6.f, 0, 1.2f);
+			}
+			else if (hov)
+			{
+				dl->AddRectFilled(bb.Min, bb.Max, C(kNavActive, 0.85f), 6.f);
+				dl->AddRect(bb.Min, bb.Max, C(kStroke, 1.5f), 6.f);
+			}
+			else
+			{
+				dl->AddRectFilled(bb.Min, bb.Max, C(kCard, 0.75f), 6.f);
+				dl->AddRect(bb.Min, bb.Max, C(kStroke, 0.8f), 6.f);
+			}
+
+			const float leftX = bb.Min.x + 10.f;
+			const float rightX = bb.Max.x - 10.f;
+			const float line1Y = bb.Min.y + 7.f;
+			const float line2Y = bb.Min.y + 27.f;
+
+			float curX = leftX;
+
+			// Role badge
+			std::string roleStr = ent.roleName;
+			if (roleStr.empty()) roleStr = "UNKNOWN";
+			std::string roleLower = roleStr;
+			std::transform(roleLower.begin(), roleLower.end(), roleLower.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+
+			ImVec4 roleColor = kTextDim;
+			if (roleLower.find("crim") != std::string::npos) roleColor = ImVec4(245 / 255.f, 75 / 255.f, 75 / 255.f, 1.f);
+			else if (roleLower.find("pol") != std::string::npos || roleLower.find("cop") != std::string::npos) roleColor = ImVec4(70 / 255.f, 150 / 255.f, 255 / 255.f, 1.f);
+			else if (roleLower.find("civ") != std::string::npos) roleColor = kGreen;
+
+			const float roleW = TextW(font::inter_medium_small, roleStr.c_str()) + 8.f;
+			const ImRect roleRect(ImVec2(curX, line1Y), ImVec2(curX + roleW, line1Y + 16.f));
+			dl->AddRectFilled(roleRect.Min, roleRect.Max, C(roleColor, 0.18f), 3.f);
+			dl->AddRect(roleRect.Min, roleRect.Max, C(roleColor, 0.45f), 3.f);
+			dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
+				ImVec2(roleRect.Min.x + 4.f, roleRect.Min.y + 1.f), C(roleColor), roleStr.c_str());
+			curX += roleW + 8.f;
+
+			// Player Name
+			dl->AddText(font::inter_medium_widget, font::inter_medium_widget->FontSize,
+				ImVec2(curX, line1Y - 1.f), C(kText), item.name.c_str());
+			curX += TextW(font::inter_medium_widget, item.name.c_str()) + 4.f;
+
+			// Clan Tag
+			if (!item.clan.empty())
+			{
+				std::string clanTagStr = "<" + item.clan + ">";
+				dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
+					ImVec2(curX, line1Y + 1.f), C(kAccentBright), clanTagStr.c_str());
+				curX += TextW(font::inter_medium_small, clanTagStr.c_str()) + 6.f;
+			}
+
+			// Badges: YOU / PARTY / DEAD / AIMING
+			if (item.isLocal)
+			{
+				const char* tag = "YOU";
+				const float tw = TextW(font::inter_medium_small, tag) + 6.f;
+				dl->AddRectFilled(ImVec2(curX, line1Y), ImVec2(curX + tw, line1Y + 16.f), C(kAccent, 0.3f), 3.f);
+				dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize, ImVec2(curX + 3.f, line1Y + 1.f), C(kAccentBright), tag);
+				curX += tw + 4.f;
+			}
+			else if (ent.isPartyMember)
+			{
+				const char* tag = "PARTY";
+				const float tw = TextW(font::inter_medium_small, tag) + 6.f;
+				dl->AddRectFilled(ImVec2(curX, line1Y), ImVec2(curX + tw, line1Y + 16.f), C(kGreen, 0.25f), 3.f);
+				dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize, ImVec2(curX + 3.f, line1Y + 1.f), C(kGreen), tag);
+				curX += tw + 4.f;
+			}
+
+			if (ent.isDead)
+			{
+				const char* tag = "DEAD";
+				const float tw = TextW(font::inter_medium_small, tag) + 6.f;
+				dl->AddRectFilled(ImVec2(curX, line1Y), ImVec2(curX + tw, line1Y + 16.f), C(kRed, 0.3f), 3.f);
+				dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize, ImVec2(curX + 3.f, line1Y + 1.f), C(kRed), tag);
+				curX += tw + 4.f;
+			}
+			else if (ent.isKnockedDown || ent.isKnockedOut)
+			{
+				const char* tag = "KNOCKED";
+				const float tw = TextW(font::inter_medium_small, tag) + 6.f;
+				dl->AddRectFilled(ImVec2(curX, line1Y), ImVec2(curX + tw, line1Y + 16.f), IM_COL32(255, 170, 0, 80), 3.f);
+				dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize, ImVec2(curX + 3.f, line1Y + 1.f), IM_COL32(255, 200, 50, 255), tag);
+				curX += tw + 4.f;
+			}
+
+			if (ent.isAimingAtLocal)
+			{
+				const char* tag = "AIMING AT YOU";
+				const float tw = TextW(font::inter_medium_small, tag) + 6.f;
+				dl->AddRectFilled(ImVec2(curX, line1Y), ImVec2(curX + tw, line1Y + 16.f), C(kRed, 0.35f), 3.f);
+				dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize, ImVec2(curX + 3.f, line1Y + 1.f), C(kRed), tag);
+				curX += tw + 4.f;
+			}
+
+			// Line 1 Right: Distance & Bag Value
+			std::string bagStr = FormatMoney(ent.bagValue);
+			const float bagW = TextW(font::inter_medium_widget, bagStr.c_str());
+			dl->AddText(font::inter_medium_widget, font::inter_medium_widget->FontSize,
+				ImVec2(rightX - bagW, line1Y - 1.f), C(kGreen), bagStr.c_str());
+
+			std::string distStr = item.isLocal ? "0 m" : FormatDistance(item.distance);
+			const float distW = TextW(font::inter_medium_widget, distStr.c_str());
+			ImU32 distCol = C(kTextDim);
+			if (!item.isLocal)
+			{
+				if (item.distance < 50.f) distCol = C(kRed);
+				else if (item.distance < 120.f) distCol = IM_COL32(255, 185, 60, 255);
+			}
+			dl->AddText(font::inter_medium_widget, font::inter_medium_widget->FontSize,
+				ImVec2(rightX - bagW - distW - 20.f, line1Y - 1.f), distCol, distStr.c_str());
+
+			// Line 2 Left: Health, Armor, Weapon
+			float l2X = leftX;
+			char hpBuf[64];
+			if (ent.isDead)
+			{
+				std::snprintf(hpBuf, sizeof(hpBuf), "DEAD");
+			}
+			else if (ent.healthKnown && ent.health >= 0.f)
+			{
+				if (ent.hasArmor && ent.armor > 0.f)
+				{
+					std::snprintf(hpBuf, sizeof(hpBuf), "HP %.0f/%.0f  |  AP %.0f", ent.health, ent.maxHealth > 0.f ? ent.maxHealth : 100.f, ent.armor);
+				}
+				else
+				{
+					std::snprintf(hpBuf, sizeof(hpBuf), "HP %.0f/%.0f", ent.health, ent.maxHealth > 0.f ? ent.maxHealth : 100.f);
+				}
+			}
+			else
+			{
+				std::snprintf(hpBuf, sizeof(hpBuf), "HP ?");
+			}
+
+			ImU32 hpCol = ent.isDead ? C(kRed) : (ent.health < 40.f && ent.healthKnown ? C(kRed) : C(kTextDim));
+			dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
+				ImVec2(l2X, line2Y), hpCol, hpBuf);
+			l2X += TextW(font::inter_medium_small, hpBuf) + 14.f;
+
+			std::string wepStr = "Weapon: " + item.weapon;
+			dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
+				ImVec2(l2X, line2Y), C(kTextFaint), wepStr.c_str());
+			l2X += TextW(font::inter_medium_small, wepStr.c_str()) + 12.f;
+
+			if (ent.inVehicle)
+			{
+				const char* vStr = "[Vehicle]";
+				dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
+					ImVec2(l2X, line2Y), C(kAccentBright), vStr);
+				l2X += TextW(font::inter_medium_small, vStr) + 8.f;
+			}
+
+			// Line 2 Right: Value Breakdown
+			char breakdownBuf[128];
+			std::snprintf(breakdownBuf, sizeof(breakdownBuf), "Cash: %s  |  Items: %s  |  Equip: %s",
+				FormatMoney(ent.bagCash).c_str(),
+				FormatMoney(ent.bagItems).c_str(),
+				FormatMoney(ent.equipValue).c_str());
+			const float breakW = TextW(font::inter_medium_small, breakdownBuf);
+			dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
+				ImVec2(rightX - breakW, line2Y), C(kTextFaint), breakdownBuf);
+		}
+	}
+	EndCard();
+}
+
 void DrawMisc()
 {
 	// Two rows of two cards. Session stats sit under the catalog, while the
@@ -1922,13 +2337,9 @@ void DrawSidebar(const ImVec2& pos, bool attached)
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
 		ImGuiWindowFlags_NoSavedSettings);
 	{
-		const ImTextureID icons[kPageCount] = {
-			(ImTextureID)(intptr_t)g_icon[0],
-			(ImTextureID)(intptr_t)g_icon[1],
-			(ImTextureID)(intptr_t)g_icon[2],
-			(ImTextureID)(intptr_t)g_icon[3],
-			(ImTextureID)(intptr_t)g_icon[4],
-		};
+		ImTextureID icons[kPageCount];
+		for (int i = 0; i < kPageCount; i++)
+			icons[i] = (ImTextureID)(intptr_t)g_icon[i];
 		for (int i = 0; i < kPageCount; i++)
 			if (PageButton(i, kPageNames[i], icons[i], kSide - 24.f))
 				g_page = i;
@@ -2093,8 +2504,9 @@ void Init()
 	g_icon[0] = LoadTextureFromMemory(visuals, sizeof(visuals));
 	g_icon[1] = LoadTextureFromMemory(world, sizeof(world));
 	g_icon[2] = LoadTextureFromMemory(ragebot, sizeof(ragebot));
-	g_icon[3] = LoadTextureFromMemory(misc, sizeof(misc));
-	g_icon[4] = LoadTextureFromMemory(settings, sizeof(settings));
+	g_icon[3] = LoadTextureFromMemory(world, sizeof(world));
+	g_icon[4] = LoadTextureFromMemory(misc, sizeof(misc));
+	g_icon[5] = LoadTextureFromMemory(settings, sizeof(settings));
 }
 
 void Draw(bool attached, const std::string& statusText)
@@ -2280,8 +2692,9 @@ void Draw(bool attached, const std::string& statusText)
 		case 0: DrawVisuals(); break;
 		case 1: DrawRadar(); break;
 		case 2: DrawAim(); break;
-		case 3: DrawMisc(); break;
-		case 4: DrawSettings(attached, statusText); break;
+		case 3: DrawServer(); break;
+		case 4: DrawMisc(); break;
+		case 5: DrawSettings(attached, statusText); break;
 		default: break;
 		}
 
