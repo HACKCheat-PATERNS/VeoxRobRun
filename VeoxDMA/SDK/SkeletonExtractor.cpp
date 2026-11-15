@@ -28,6 +28,14 @@ static Vec Rotate(Quat q, Vec v) {
     t = {2*t.x,2*t.y,2*t.z};
     return Add(v,Add({q.w*t.x,q.w*t.y,q.w*t.z},Cross({q.x,q.y,q.z},t)));
 }
+static Quat MulQuat(Quat a, Quat b) {
+    return {
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z
+    };
+}
 static bool Finite(Vec v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
@@ -142,7 +150,10 @@ static bool TryLoadHierarchyFromTransform(Snapshot& m, U nativeTransform, bool w
     const U parents = m.ptr(hierarchy, 0x20);
     const U pointers = m.ptr(hierarchy, 0x30);
     std::int32_t count = 0;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 512) return false;
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 512) {
+        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 512)
+            return false;
+    }
 
     std::vector<TRS> local(static_cast<std::size_t>(count));
     std::vector<std::int32_t> parent(static_cast<std::size_t>(count));
@@ -199,27 +210,31 @@ static bool TryLoadHierarchyFromTransform(Snapshot& m, U nativeTransform, bool w
 static bool ResolveViewHierarchy(Snapshot& m, U view, ResolvedHierarchy& out)
 {
     auto tryManagedTransform = [&](U managed, bool walkToRoot) -> bool {
+        if (managed <= 0x10000) return false;
+        U native = m.ptr(managed, 0x10);
+        if (native > 0x10000 && TryLoadHierarchyFromTransform(m, native, walkToRoot, out))
+            return true;
         if (!m.is(managed, "Transform")) return false;
         return TryLoadHierarchyFromTransform(m, m.ptr(managed, 0x10), walkToRoot, out);
     };
 
-    const U movement = m.ptr(view, 0x20);
-    if (m.isOneOf(movement, {"CharacterMovementView", "MovementView"}) &&
-        tryManagedTransform(m.ptr(movement, 0x20), true))
-        return true;
-
+    // Priority 1: Direct HeadPosition at +0xE8 (3-hop fast path)
     if (tryManagedTransform(m.ptr(view, 0xE8), true))
         return true;
 
+    // Priority 2: CharacterMovementView._transform (+0x20 -> +0x20)
+    const U movement = m.ptr(view, 0x20);
+    if (movement > 0x10000 && tryManagedTransform(m.ptr(movement, 0x20), true))
+        return true;
+
+    // Priority 3: Animation views
     const U animation = m.ptr(view, 0x28);
-    if (m.isOneOf(animation, {"CharacterAnimationView", "AnimationView"})) {
+    if (animation > 0x10000) {
         const U torso = m.ptr(animation, 0x30);
-        if (m.isOneOf(torso, {"CharacterTorsoDeformationView", "TorsoView"}) &&
-            tryManagedTransform(m.ptr(torso, 0x20), true))
+        if (torso > 0x10000 && tryManagedTransform(m.ptr(torso, 0x20), true))
             return true;
         const U head = m.ptr(animation, 0x28);
-        if (m.isOneOf(head, {"CharacterHeadManualControlView", "HeadView"}) &&
-            tryManagedTransform(m.ptr(head, 0x20), true))
+        if (head > 0x10000 && tryManagedTransform(m.ptr(head, 0x20), true))
             return true;
     }
 
@@ -363,10 +378,27 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     // Include crown/HeadPosition (+0xE8) when directly parented to skull so the
     // full head height is represented on the spine without shifting out.head.
     const int headTop = resolve(m.ptr(view, 0xE8));
-    if (headTop >= 0 && out.head >= 0 && headTop != out.head && parent[headTop] == out.head) {
-        const float dx = local[headTop].p.x, dy = local[headTop].p.y, dz = local[headTop].p.z;
-        if (dx*dx + dy*dy + dz*dz < 0.25f)
+    if (headTop >= 0) {
+        if (out.head >= 0 && headTop != out.head && parent[headTop] == out.head) {
+            const float dx = local[headTop].p.x, dy = local[headTop].p.y, dz = local[headTop].p.z;
+            if (dx*dx + dy*dy + dz*dz < 0.25f)
+                pushAnchor(headTop);
+        } else if (out.head < 0) {
+            out.head = headTop;
             pushAnchor(headTop);
+            if (out.neck < 0 && parent[headTop] >= 0) {
+                out.neck = parent[headTop];
+                pushAnchor(out.neck);
+                if (out.chest < 0 && parent[out.neck] >= 0) {
+                    out.chest = parent[out.neck];
+                    pushAnchor(out.chest);
+                    if (out.pelvis < 0 && parent[out.chest] >= 0) {
+                        out.pelvis = parent[out.chest];
+                        pushAnchor(out.pelvis);
+                    }
+                }
+            }
+        }
     }
 
     // TorsoView._spine2 is waist-level; prefer the shared thigh parent (true hips)
@@ -529,6 +561,24 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
         if (out.selected[b] && p >= 0 && out.selected[p])
             out.segments.push_back({p, b});
     }
+    // Direct parent-link fallback: if IK views didn't resolve segments,
+    // connect all valid bone pairs to guarantee skeletal completeness
+    if (out.segments.empty()) {
+        for (int b = 0; b < count; ++b) {
+            const int p = out.parent[b];
+            if (p >= 0 && p < count) {
+                const float dx = local[b].p.x;
+                const float dy = local[b].p.y;
+                const float dz = local[b].p.z;
+                const float distSq = dx*dx + dy*dy + dz*dz;
+                if (distSq > 0.0004f && distSq < 1.44f) {
+                    out.segments.push_back({p, b});
+                    out.selected[b] = 1;
+                    out.selected[p] = 1;
+                }
+            }
+        }
+    }
     return !out.segments.empty();
 }
 
@@ -549,20 +599,38 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
     }
 
     std::vector<Vec> world(static_cast<std::size_t>(count));
+    std::vector<Quat> worldRot(static_cast<std::size_t>(count));
     std::vector<unsigned char> worldValid(static_cast<std::size_t>(count), 0);
     for (int b = 0; b < count; ++b) {
         if (!boneValid[b]) continue;
-        Vec v = local[b].p;
-        bool ok = true;
-        int steps = 0;
-        for (int p = layout.parent[b]; p != -1; ++steps) {
-            if (steps >= count || p < 0 || p >= count || !boneValid[p]) { ok = false; break; }
-            v = Add(local[p].p, Rotate(local[p].q, Mul(local[p].s, v)));
-            p = layout.parent[p];
+        const int p = layout.parent[b];
+        if (p < 0) {
+            // Root bone
+            world[b] = local[b].p;
+            worldRot[b] = local[b].q;
+            worldValid[b] = 1;
+        } else if (p < b && worldValid[p]) {
+            // Topological parent-first fast-path:
+            // world = parent pos + parent rot * local pos
+            // rot = parent rot * local rot
+            worldRot[b] = MulQuat(worldRot[p], local[b].q);
+            world[b] = Add(world[p], Rotate(worldRot[p], Mul(local[b].s, local[b].p)));
+            worldValid[b] = 1;
+        } else {
+            // Fallback for non-topological parent index
+            Vec v = local[b].p;
+            bool ok = true;
+            int steps = 0;
+            for (int curP = p; curP != -1; ++steps) {
+                if (steps >= count || curP < 0 || curP >= count || !boneValid[curP]) { ok = false; break; }
+                v = Add(local[curP].p, Rotate(local[curP].q, Mul(local[curP].s, v)));
+                curP = layout.parent[curP];
+            }
+            if (ok && Finite(v)) {
+                world[b] = v;
+                worldValid[b] = 1;
+            }
         }
-        if (!ok || !Finite(v)) continue;
-        world[b] = v;
-        worldValid[b] = 1;
     }
 
     std::vector<BoneSegment> result;
@@ -570,6 +638,21 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
     for (const auto& seg : layout.segments) {
         if (!worldValid[seg.first] || !worldValid[seg.second]) continue;
         result.push_back({world[seg.first], world[seg.second]});
+    }
+    if (result.empty()) {
+        // Fallback: line each bone to its parent
+        for (int b = 0; b < count; ++b) {
+            const int p = layout.parent[b];
+            if (p >= 0 && p < count && worldValid[p] && worldValid[b]) {
+                const float dx = world[b].x - world[p].x;
+                const float dy = world[b].y - world[p].y;
+                const float dz = world[b].z - world[p].z;
+                const float lenSq = dx*dx + dy*dy + dz*dz;
+                if (lenSq > 0.0004f && lenSq < 1.44f) {
+                    result.push_back({world[p], world[b]});
+                }
+            }
+        }
     }
     out = std::move(result);
 
@@ -916,13 +999,16 @@ bool ResolveRigTarget(U view, const Read& read, RigTarget& out)
     if (!read || view <= 0x10000) return false;
     Snapshot m{read,{}};
 
-    // Documented chain: the entity view exposes the movement view, and the
-    // CharacterMovementView exposes the managed root Transform through
-    // _transform(). The native Unity object is what owns the transform
-    // hierarchy, so both hops are needed.
-    U movement = m.ptr(view, 0x20);
-    U managed = (movement > 0x10000) ? m.ptr(movement, 0x20) : 0;
-    U native = (managed > 0x10000) ? m.ptr(managed, 0x10) : 0;
+    // Fast path: try view + 0xE8 (HeadPosition)
+    U managedHead = m.ptr(view, 0xE8);
+    U native = (managedHead > 0x10000) ? m.ptr(managedHead, 0x10) : 0;
+    U managed = managedHead;
+    U movement = 0;
+    if (native <= 0x10000) {
+        movement = m.ptr(view, 0x20);
+        managed = (movement > 0x10000) ? m.ptr(movement, 0x20) : 0;
+        native = (managed > 0x10000) ? m.ptr(managed, 0x10) : 0;
+    }
 
     // Some rigs expose the same native transform straight off the view; keep
     // that as a fallback rather than rejecting the character.
@@ -930,11 +1016,14 @@ bool ResolveRigTarget(U view, const Read& read, RigTarget& out)
     if (native <= 0x10000) return false;
 
     U hierarchy = m.ptr(native, 0x28);
+    if (hierarchy <= 0x10000) return false;
     U matrices = m.ptr(hierarchy, 0x18);
     std::int32_t count = 0;
-    if (hierarchy <= 0x10000 || matrices <= 0x10000 ||
-        !m.get(hierarchy + 0x38, count) || count < 2 || count > 512)
-        return false;
+    if (matrices <= 0x10000) return false;
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 512) {
+        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 512)
+            return false;
+    }
 
     out.view = view;
     out.movementView = movement;
@@ -952,13 +1041,16 @@ bool RootWorldPosition(U view, const Read& read, Vec& out)
     if (!read || view <= 0x10000) return false;
     Snapshot m{read,{}};
 
-    // Same chain as BuildLayoutFromView: the view exposes the movement view,
-    // which exposes the managed root Transform, which owns the native object
-    // and its transform hierarchy. The native object straight off the view is
-    // the fallback used by some characters.
-    U movement = m.ptr(view, 0x20);
-    U managed = (movement > 0x10000) ? m.ptr(movement, 0x20) : 0;
-    U native = (managed > 0x10000) ? m.ptr(managed, 0x10) : 0;
+    // Fast path: try view + 0xE8 (HeadPosition)
+    U managedHead = m.ptr(view, 0xE8);
+    U native = (managedHead > 0x10000) ? m.ptr(managedHead, 0x10) : 0;
+    U movement = 0;
+    U managed = managedHead;
+    if (native <= 0x10000) {
+        movement = m.ptr(view, 0x20);
+        managed = (movement > 0x10000) ? m.ptr(movement, 0x20) : 0;
+        native = (managed > 0x10000) ? m.ptr(managed, 0x10) : 0;
+    }
     if (native <= 0x10000) native = m.ptr(view, 0x10);
     if (native <= 0x10000) return false;
 
@@ -967,9 +1059,11 @@ bool RootWorldPosition(U view, const Read& read, Vec& out)
     U matrices = m.ptr(hierarchy, 0x18);
     U parents = m.ptr(hierarchy, 0x20);
     std::int32_t count = 0;
-    if (matrices <= 0x10000 || parents <= 0x10000 ||
-        !m.get(hierarchy + 0x38, count) || count < 2 || count > 512)
-        return false;
+    if (matrices <= 0x10000 || parents <= 0x10000) return false;
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 512) {
+        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 512)
+            return false;
+    }
 
     // The root is the only node without a parent, so its local TRS is already
     // the world transform. Everything below it is composed by SampleLayout.
