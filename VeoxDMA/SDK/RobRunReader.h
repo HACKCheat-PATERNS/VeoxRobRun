@@ -83,6 +83,8 @@ struct Snapshot {
     RobRunCamera::CameraState camera;
     std::int32_t localEntityId = -1;
     Vector3 localPosition{};
+    float localYaw = 0.f;
+    float localPitch = 0.f;
     int observerCount = 0;
     bool spectatorAlert = false;
     std::uintptr_t game = 0;
@@ -137,6 +139,7 @@ SnapshotPtr GetSnapshot();
 
 std::int32_t GetLocalEntityId();
 Vector3 GetLocalPosition();
+float GetLocalYaw();
 std::uintptr_t GetGamePtr();
 std::uintptr_t GetBattleModelPtr();
 std::uintptr_t GetLocalCharacterPtr();

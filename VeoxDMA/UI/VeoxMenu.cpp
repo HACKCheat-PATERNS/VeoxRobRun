@@ -1139,33 +1139,15 @@ void DrawRadar()
 	{
 		BeginCard("RADAR", kCardW);
 		ToggleRow("Enable Radar", &ConfigInstance.Radar.Enabled);
-
-		const auto& maps = Radar::GetMapFiles();
-		int mapIdx = Radar::GetCurrentMapIndex();
-		if (!maps.empty())
-		{
-			std::vector<const char*> items;
-			items.reserve(maps.size());
-			for (const auto& m : maps) items.push_back(m.c_str());
-			int sel = ImClamp(mapIdx, 0, (int)items.size() - 1);
-			if (ComboRow("Map", &sel, items.data(), (int)items.size()))
-				Radar::SetMap(sel);
-		}
-		else
-		{
-			Note("No maps found in the maps folder.");
-		}
-
 		ToggleRow("Show Players", &ConfigInstance.Radar.ShowPlayers);
-		ToggleRow("Show Map Image", &ConfigInstance.Radar.ShowMap);
 		ToggleRow("Show Vehicles", &ConfigInstance.Radar.ShowVehicles);
 		ToggleRow("Show Loot", &ConfigInstance.Radar.ShowLoot);
 		ToggleRow("Rotate With Camera", &ConfigInstance.Radar.RotateWithCamera);
 
 		SectionLabel("DISPLAY");
-		SliderFloatRow("Size", &ConfigInstance.Radar.Size, 150.f, 800.f, "px");
-		SliderFloatRow("Zoom", &ConfigInstance.Radar.Zoom, 0.2f, 10.f, "x");
-		SliderFloatRow("Opacity", &ConfigInstance.Radar.Opacity, 0.1f, 1.f);
+		SliderFloatRow("Size", &ConfigInstance.Radar.Size, 100.f, 1000.f, "px");
+		SliderFloatRow("Zoom", &ConfigInstance.Radar.Zoom, 0.1f, 10.f, "x");
+		SliderFloatRow("Opacity", &ConfigInstance.Radar.Opacity, 0.0f, 1.f);
 		EndCard();
 	}
 	ImGui::EndGroup();
@@ -1176,7 +1158,7 @@ void DrawRadar()
 	ImGui::BeginGroup();
 	{
 		BeginCard("MAP BOUNDS", kCardW);
-		Note("World coordinates used to project entity positions onto the map image.");
+		Note("World coordinates used to calibrate entity scale over the in-game map.");
 		SectionLabel("X AXIS");
 		SliderFloatRow("Min X", &ConfigInstance.Radar.WorldMinX, -5000.f, 5000.f);
 		SliderFloatRow("Max X", &ConfigInstance.Radar.WorldMaxX, -5000.f, 5000.f);
@@ -1191,7 +1173,7 @@ void DrawRadar()
 			ConfigInstance.Radar.WorldMaxZ = 400.f;
 		}
 		Note("The radar reads entity positions from the same snapshot as the ESP. "
-			"Bounds only affect where those positions land on the image.");
+			"Bounds calibrate where positions land on the map.");
 		EndCard();
 	}
 	ImGui::EndGroup();

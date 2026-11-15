@@ -14,12 +14,12 @@ public:
 	bool Enabled = true;
 	float Size = 300.f;
 	float Zoom = 1.f;
-	float Opacity = 0.85f;
+	float Opacity = 0.5f;
 	bool ShowPlayers = true;
 	bool ShowVehicles = false;
 	bool ShowLoot = false;
-	bool RotateWithCamera = true;
-	bool ShowMap = true;
+	bool RotateWithCamera = false;
+	bool ShowMap = false;
 
 	float WorldMinX = -600.f;
 	float WorldMaxX = 600.f;

@@ -135,6 +135,8 @@ static std::uint64_t worldRefreshStamp = 0;
 static std::uint64_t inventoryRefreshStamp = 0;
 static RobRunCamera::CameraState cameraState;
 static Vector3 localPosition{};
+static float localYaw = 0.f;
+static float localPitch = 0.f;
 static std::uint32_t failureCount = 0;
 static std::uint32_t poseFailureCount = 0;
 static std::atomic<bool> readCatalog{ false };
@@ -528,6 +530,8 @@ static void PublishSnapshot()
     snapshot->camera = cameraState;
     snapshot->localEntityId = localEntityId;
     snapshot->localPosition = localPosition;
+    snapshot->localYaw = localYaw;
+    snapshot->localPitch = localPitch;
     snapshot->game = cachedGame;
     snapshot->battleModel = cachedBattleModel;
     snapshot->localCharacter = cachedLocalCharacter;
@@ -1775,13 +1779,19 @@ static void UpdateInternal()
         if (cachedLocalCharacter > 0x10000) {
             const std::uintptr_t transform = ReadPtr(
                 cachedLocalCharacter + rr::BattleCharacterModel::CharacterTransformModel);
-            Vector3 position{};
+            struct LocalTransformBlock {
+                Vector3 position;
+                float pitch;
+                float yaw;
+            } localBlock{};
             const std::uintptr_t positionAddress =
                 transform + rr::CharacterTransformModel::Position;
-            if ((RobRunMemory::ReadBytesFresh(positionAddress, &position, sizeof(position)) ||
-                 RobRunMemory::ReadBytes(positionAddress, &position, sizeof(position))) &&
-                RobRunMemory::Finite(position)) {
-                localPosition = position;
+            if ((RobRunMemory::ReadBytesFresh(positionAddress, &localBlock, sizeof(localBlock)) ||
+                 RobRunMemory::ReadBytes(positionAddress, &localBlock, sizeof(localBlock))) &&
+                RobRunMemory::Finite(localBlock.position)) {
+                localPosition = localBlock.position;
+                if (std::isfinite(localBlock.yaw)) localYaw = localBlock.yaw;
+                if (std::isfinite(localBlock.pitch)) localPitch = localBlock.pitch;
             }
 
             {
@@ -2599,9 +2609,16 @@ static void UpdateInternal()
                 entity.visible = anyVisible;
             }
 
-            if (entity.entityId == localEntityId && localPosition.IsZero() &&
-                !entity.position.IsZero()) {
-                localPosition = entity.position;
+            if (entity.entityId == localEntityId) {
+                if (localPosition.IsZero() && !entity.position.IsZero()) {
+                    localPosition = entity.position;
+                }
+                if (std::isfinite(entity.yaw) && entity.yaw != 0.f) {
+                    localYaw = entity.yaw;
+                }
+                if (std::isfinite(entity.pitch) && entity.pitch != 0.f) {
+                    localPitch = entity.pitch;
+                }
             }
 
             entities.push_back(std::move(entity));
@@ -2658,6 +2675,12 @@ Vector3 GetLocalPosition()
 {
     const auto snapshot = GetSnapshot();
     return snapshot ? snapshot->localPosition : Vector3();
+}
+
+float GetLocalYaw()
+{
+    const auto snapshot = GetSnapshot();
+    return snapshot ? snapshot->localYaw : 0.f;
 }
 
 std::uintptr_t GetGamePtr()

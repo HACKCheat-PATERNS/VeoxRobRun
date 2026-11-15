@@ -135,17 +135,18 @@ ImVec2 WorldToRadar(const Vector3& world, const Vector3& center,
 	float dx = world.x - center.x;
 	float dz = world.z - center.z;
 
+	float plotX = dx;
+	float plotZ = dz;
+
 	if (rotate) {
-		float s = std::sin(-yaw);
-		float c = std::cos(-yaw);
-		float rx = dx * c - dz * s;
-		float rz = dx * s + dz * c;
-		dx = rx;
-		dz = rz;
+		float fwd = dx * std::sin(yaw) + dz * std::cos(yaw);
+		float right = dx * std::cos(yaw) - dz * std::sin(yaw);
+		plotX = right;
+		plotZ = fwd;
 	}
 
 	float scale = radarSize / std::max(worldW, worldH) * zoom;
-	return ImVec2(radarCenter.x + dx * scale, radarCenter.y + dz * scale);
+	return ImVec2(radarCenter.x + plotX * scale, radarCenter.y - plotZ * scale);
 }
 
 struct RoleMarker {
@@ -231,11 +232,19 @@ void Draw()
 
 	float localYaw = 0.f;
 	if (snapshot) {
-		for (const auto& ent : snapshot->entities) {
-			if (ent.entityId == snapshot->localEntityId) {
-				localYaw = ent.yaw;
-				break;
+		if (std::isfinite(snapshot->localYaw) && snapshot->localYaw != 0.f) {
+			localYaw = snapshot->localYaw;
+		}
+		if (localYaw == 0.f) {
+			for (const auto& ent : snapshot->entities) {
+				if (ent.entityId == snapshot->localEntityId) {
+					localYaw = ent.yaw;
+					break;
+				}
 			}
+		}
+		if (localYaw == 0.f && snapshot->camera.valid) {
+			localYaw = std::atan2(snapshot->camera.forward.x, snapshot->camera.forward.z);
 		}
 	}
 
@@ -266,14 +275,20 @@ void Draw()
 		ImGui::SetNextWindowSize(ImVec2(radarSize + 16.f, radarSize + 36.f), ImGuiCond_Always);
 	s_lastSizeSetting = cfg.Size;
 
-	ImGui::SetNextWindowBgAlpha(cfg.Opacity);
+	const float op = std::clamp(cfg.Opacity, 0.0f, 1.0f);
+	const int bgAlpha = (int)(op * 220.f);
+	const int borderAlpha = std::clamp((int)(op * 140.f + 40.f), 0, 255);
+	const int titleAlpha = std::clamp((int)(op * 200.f + 55.f), 20, 255);
+	const int titleActiveAlpha = std::clamp((int)(op * 220.f + 35.f), 30, 255);
+
+	ImGui::SetNextWindowBgAlpha(op);
 
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.f);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.f, 4.f));
-	ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(12, 12, 18, 220));
-	ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(40, 80, 160, 120));
-	ImGui::PushStyleColor(ImGuiCol_TitleBg, IM_COL32(18, 20, 30, 255));
-	ImGui::PushStyleColor(ImGuiCol_TitleBgActive, IM_COL32(30, 120, 255, 200));
+	ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(12, 12, 18, bgAlpha));
+	ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(40, 80, 160, borderAlpha));
+	ImGui::PushStyleColor(ImGuiCol_TitleBg, IM_COL32(18, 20, 30, titleAlpha));
+	ImGui::PushStyleColor(ImGuiCol_TitleBgActive, IM_COL32(30, 120, 255, titleActiveAlpha));
 
 	if (!ImGui::Begin("Radar", &ConfigInstance.Radar.Enabled,
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
@@ -342,7 +357,8 @@ void Draw()
 
 			dl->AddImageQuad((ImTextureID)g_mapSRV,
 				p1, p2, p3, p4,
-				uvA, ImVec2(uvB.x, uvA.y), uvB, ImVec2(uvA.x, uvB.y));
+				uvA, ImVec2(uvB.x, uvA.y), uvB, ImVec2(uvA.x, uvB.y),
+				IM_COL32(255, 255, 255, (int)(op * 255.f)));
 		}
 		else {
 			if (haveLocal) {
@@ -359,27 +375,34 @@ void Draw()
 				ImVec2 uvA(normX - halfViewU, normZ - halfViewV);
 				ImVec2 uvB(normX + halfViewU, normZ + halfViewV);
 
-				dl->AddImage((ImTextureID)g_mapSRV, radarMin, radarMax, uvA, uvB);
+				dl->AddImage((ImTextureID)g_mapSRV, radarMin, radarMax, uvA, uvB,
+					IM_COL32(255, 255, 255, (int)(op * 255.f)));
 			}
 			else {
 				dl->AddImage((ImTextureID)g_mapSRV, radarMin, radarMax,
-					ImVec2(0.f, 0.f), ImVec2(1.f, 1.f));
+					ImVec2(0.f, 0.f), ImVec2(1.f, 1.f),
+					IM_COL32(255, 255, 255, (int)(op * 255.f)));
 			}
 		}
 	}
 	else {
 		// Clean transparent/dark backing with range rings so the radar functions
 		// seamlessly whether overlaid on the in-game minimap or running standalone.
-		dl->AddCircleFilled(radarCenter, side * 0.5f, IM_COL32(14, 16, 24, 180));
-		dl->AddCircle(radarCenter, side * 0.5f * 0.66f, IM_COL32(50, 90, 160, 70), 64, 1.f);
-		dl->AddCircle(radarCenter, side * 0.5f * 0.33f, IM_COL32(50, 90, 160, 70), 64, 1.f);
+		const int circleBgAlpha = (int)(op * 180.f);
+		if (circleBgAlpha > 0) {
+			dl->AddCircleFilled(radarCenter, side * 0.5f, IM_COL32(14, 16, 24, circleBgAlpha));
+		}
+		const int gridAlpha = (int)(op * 50.f + 25.f);
+		dl->AddCircle(radarCenter, side * 0.5f * 0.66f, IM_COL32(50, 90, 160, gridAlpha), 64, 1.f);
+		dl->AddCircle(radarCenter, side * 0.5f * 0.33f, IM_COL32(50, 90, 160, gridAlpha), 64, 1.f);
 		dl->AddLine(ImVec2(radarCenter.x, radarCenter.y - side * 0.5f),
-			ImVec2(radarCenter.x, radarCenter.y + side * 0.5f), IM_COL32(50, 90, 160, 70), 1.f);
+			ImVec2(radarCenter.x, radarCenter.y + side * 0.5f), IM_COL32(50, 90, 160, gridAlpha), 1.f);
 		dl->AddLine(ImVec2(radarCenter.x - side * 0.5f, radarCenter.y),
-			ImVec2(radarCenter.x + side * 0.5f, radarCenter.y), IM_COL32(50, 90, 160, 70), 1.f);
+			ImVec2(radarCenter.x + side * 0.5f, radarCenter.y), IM_COL32(50, 90, 160, gridAlpha), 1.f);
 	}
 
-	dl->AddCircle(radarCenter, side * 0.5f, IM_COL32(40, 80, 160, 180), 64, 2.f);
+	const int ringBorderAlpha = std::clamp((int)(op * 120.f + 60.f), 60, 255);
+	dl->AddCircle(radarCenter, side * 0.5f, IM_COL32(40, 80, 160, ringBorderAlpha), 64, 2.f);
 
 	if (haveLocal && snapshot) {
 		if (snapshot->world && snapshot->world->valid) {
@@ -446,23 +469,64 @@ void Draw()
 				ImVec2 tp(pos.x - ts.x * 0.5f, pos.y - ts.y * 0.5f);
 				dl->AddText(ImVec2(tp.x + 1.f, tp.y + 1.f), IM_COL32(0, 0, 0, 255), marker.text);
 				dl->AddText(tp, marker.color, marker.text);
+				// Direction pointer for other players
+				if (ent.yaw != 0.f || ent.lookDirection.x != 0.f || ent.lookDirection.z != 0.f) {
+					float otherYaw = ent.yaw;
+					if (otherYaw == 0.f) {
+						otherYaw = std::atan2(ent.lookDirection.x, ent.lookDirection.z);
+					}
+					float otherAngle = otherYaw;
+					if (cfg.RotateWithCamera) {
+						float camYaw = localYaw;
+						if (snapshot && snapshot->camera.valid) {
+							camYaw = std::atan2(snapshot->camera.forward.x, snapshot->camera.forward.z);
+						}
+						otherAngle = otherYaw - camYaw;
+					}
+					const float os = std::sin(otherAngle);
+					const float oc = std::cos(otherAngle);
+					const ImVec2 oStart(pos.x + os * badgeRadius, pos.y - oc * badgeRadius);
+					const ImVec2 oEnd(pos.x + os * (badgeRadius + 5.f), pos.y - oc * (badgeRadius + 5.f));
+					dl->AddLine(oStart, oEnd, ringColor, 2.0f);
+				}
 			}
 		}
 
+		// Local character center dot
 		dl->AddCircleFilled(radarCenter, 5.f, IM_COL32(50, 220, 100, 255));
-		dl->AddCircle(radarCenter, 5.f, IM_COL32(0, 0, 0, 200), 0, 1.5f);
+		dl->AddCircle(radarCenter, 5.f, IM_COL32(0, 0, 0, 220), 0, 1.5f);
 
-		if (!cfg.RotateWithCamera) {
-			float dirLen = 12.f;
-			float s = std::sin(localYaw);
-			float c = std::cos(localYaw);
-			ImVec2 dirEnd(radarCenter.x + s * dirLen, radarCenter.y - c * dirLen);
-			dl->AddLine(radarCenter, dirEnd, IM_COL32(50, 220, 100, 255), 2.f);
+		// Local character directional arrowhead pointing in facing direction
+		// In game: yaw 0 = North (+Z), +PI/2 = East (+X), PI = South (-Z), -PI/2 = West (-X)
+		// On screen: North is UP (-Y), East is RIGHT (+X), South is DOWN (+Y), West is LEFT (-X)
+		float faceAngle = localYaw;
+		if (cfg.RotateWithCamera) {
+			float camYaw = localYaw;
+			if (snapshot && snapshot->camera.valid) {
+				camYaw = std::atan2(snapshot->camera.forward.x, snapshot->camera.forward.z);
+			}
+			faceAngle = localYaw - camYaw;
 		}
-		else {
-			ImVec2 dirEnd(radarCenter.x, radarCenter.y - 12.f);
-			dl->AddLine(radarCenter, dirEnd, IM_COL32(50, 220, 100, 255), 2.f);
-		}
+
+		const float s = std::sin(faceAngle);
+		const float c = std::cos(faceAngle);
+		const ImVec2 fwd(s, -c);
+		const ImVec2 rgt(c, s);
+
+		const float tipLen = 16.f;
+		const float baseLen = 4.f;
+		const float halfWidth = 5.5f;
+
+		const ImVec2 tip(radarCenter.x + fwd.x * tipLen, radarCenter.y + fwd.y * tipLen);
+		const ImVec2 leftWing(radarCenter.x + fwd.x * baseLen - rgt.x * halfWidth,
+		                      radarCenter.y + fwd.y * baseLen - rgt.y * halfWidth);
+		const ImVec2 rightWing(radarCenter.x + fwd.x * baseLen + rgt.x * halfWidth,
+		                       radarCenter.y + fwd.y * baseLen + rgt.y * halfWidth);
+
+		// Solid arrowhead with outline
+		dl->AddTriangleFilled(tip, leftWing, rightWing, IM_COL32(50, 255, 120, 255));
+		dl->AddTriangle(tip, leftWing, rightWing, IM_COL32(0, 0, 0, 220), 1.5f);
+		dl->AddLine(radarCenter, tip, IM_COL32(50, 255, 120, 255), 2.0f);
 	}
 
 	dl->PopClipRect();
