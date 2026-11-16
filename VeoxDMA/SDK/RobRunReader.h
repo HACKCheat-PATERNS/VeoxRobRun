@@ -145,6 +145,7 @@ std::uintptr_t GetBattleModelPtr();
 std::uintptr_t GetLocalCharacterPtr();
 std::uintptr_t GetCameraModelPtr();
 std::uint32_t GetFailureCount();
+std::string GetLocationId();
 
 // Enables the one-off item-catalog class scan. Disabled by default because
 // the scan is intentionally bounded but not free.

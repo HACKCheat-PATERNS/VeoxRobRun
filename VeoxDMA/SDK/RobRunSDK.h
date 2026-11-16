@@ -152,11 +152,16 @@ inline constexpr std::uintptr_t WorldEntitiesModel       = 0x518;
 inline constexpr std::uintptr_t WorldEntitiesModelAlt    = 0x60;
 
 inline constexpr std::uintptr_t CharacterSlotsModel = 0x248;
-inline constexpr std::uintptr_t CharacterSlotsModelLegacy = 0x4C8;
+inline constexpr std::uintptr_t CharacterSlotsModelLegacy = 0x4D0;
 inline constexpr std::uintptr_t ProlongedInteractionDialog = 0x188;
 inline constexpr std::uintptr_t CoinsModel                 = 0x4A8;
 inline constexpr std::uintptr_t CryptoCoinsModel           = 0x4B0;
 inline constexpr std::uintptr_t DelayedUseAction           = 0x610;
+inline constexpr std::uintptr_t BattleSettings             = 0x98;
+}
+
+namespace BattleSettingsDescription {
+inline constexpr std::uintptr_t Id    = 0x10;
 }
 
 namespace PlayerRotationInputModel {

@@ -21,6 +21,7 @@
 static std::atomic<bool> g_attached{ false };
 static std::atomic<bool> g_stopAttach{ false };
 static std::atomic<bool> g_pendingAttachToast{ false };
+static std::atomic<bool> g_pendingReattach{ false };
 static std::thread g_attachThread;
 static HINSTANCE g_hInstance = nullptr;
 
@@ -88,8 +89,23 @@ static void StopAttachLoop()
 	if (g_attachThread.joinable()) g_attachThread.join();
 }
 
+void RequestReattach()
+{
+	g_pendingReattach.store(true);
+}
+
 static void TickOverlay()
 {
+	if (g_pendingReattach.exchange(false))
+	{
+		Overlay::Notify("Re-attaching...", 0xFFFFCC44u, 2.f);
+		RobRunReader::Shutdown();
+		StopAttachLoop();
+		g_attached.store(false, std::memory_order_release);
+		SetAttachStatus("Re-attaching...");
+		StartAttachLoop();
+	}
+
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
 	Aim::SetDisplaySize(display.x, display.y);
 	RobRunReader::RefreshCamera();
@@ -155,6 +171,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		if (!ConfigInstance.Overlay.BattleMode) {
 			DrawWorldEntities();
 			Radar::Draw();
+			Radar::DrawFullMap();
 		}
 		Aim::Draw();
 		Aim::DrawDebug();
