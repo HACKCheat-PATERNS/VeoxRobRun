@@ -168,8 +168,6 @@ struct MotionSample {
     bool valid = false;
 };
 std::unordered_map<int, MotionSample> g_motion;
-// Per-entity motion history for adaptive target prediction (Issue #8).
-// Keeps a bounded ring of timestamped positions per entityId.
 struct MotionHistoryEntry {
     Vector3 position{};
     std::uint64_t tickMs = 0;
@@ -948,25 +946,19 @@ bool ApplyLeading(const Vector3& point, const Vector3& position,
 
 } // namespace
 
-// ---- Adaptive Target Prediction (Issue #8) ----
 
-// Adaptive mode is fully automatic: these fixed constants replace the old
-// user-facing "Advanced" knobs. They are not exposed in the UI and cannot be
-// changed from the config file.
 namespace AdaptiveTuning {
-constexpr int   kMaxLeadMs       = 80;    // upper bound of the automatic look-ahead
-constexpr int   kMinHistory      = 3;     // samples needed before acceleration is trusted
-constexpr int   kMaxHistory      = 24;    // retained samples per entity (memory bound)
-constexpr float kVelSmoothing    = 0.4f;  // EMA factor for velocity
-constexpr float kAccelSmoothing  = 0.3f;  // EMA factor for acceleration
-constexpr float kMaxSpeed        = 15.0f; // m/s, samples above this are rejected
-constexpr float kMaxAccel        = 60.0f; // m/s^2, samples above this are rejected
-constexpr bool  kAllowFallback   = true;  // use the linear model when accel is unreliable
-constexpr int   kStaleMs         = 500;   // age after which a sample is dropped
+constexpr int   kMaxLeadMs       = 80;
+constexpr int   kMinHistory      = 3;
+constexpr int   kMaxHistory      = 24;
+constexpr float kVelSmoothing    = 0.4f;
+constexpr float kAccelSmoothing  = 0.3f;
+constexpr float kMaxSpeed        = 15.0f;
+constexpr float kMaxAccel        = 60.0f;
+constexpr bool  kAllowFallback   = true;
+constexpr int   kStaleMs         = 500;
 } // namespace AdaptiveTuning
 
-// Push a new position sample into the bounded per-entity history.
-// Returns the number of samples currently stored.
 static int PushMotionSample(int entityId, const Vector3& position, std::uint64_t tickMs)
 {
     const int maxHistory = AdaptiveTuning::kMaxHistory;
@@ -978,11 +970,9 @@ static int PushMotionSample(int entityId, const Vector3& position, std::uint64_t
     hist.lastUpdateMs = tickMs;
     hist.valid = true;
 
-    // Bound memory: drop oldest samples beyond the limit.
     while (static_cast<int>(hist.samples.size()) > maxHistory)
         hist.samples.pop_front();
 
-    // Drop stale entries (older than staleMs relative to the newest sample).
     while (hist.samples.size() > static_cast<size_t>(minHistory)) {
         const std::uint64_t oldest = hist.samples.front().tickMs;
         if (tickMs - oldest > staleMs)
@@ -994,9 +984,6 @@ static int PushMotionSample(int entityId, const Vector3& position, std::uint64_t
     return static_cast<int>(hist.samples.size());
 }
 
-// Estimate velocity and acceleration from the bounded history using a
-// least-squares fit over the recent samples. Handles irregular timestamps.
-// Returns true when a reliable estimate is available.
 static bool EstimateMotion(const MotionHistory& hist,
     float& velX, float& velY, float& velZ,
     float& accX, float& accY, float& accZ)
@@ -1010,7 +997,6 @@ static bool EstimateMotion(const MotionHistory& hist,
     const double totalMs = static_cast<double>(tn - t0);
     if (totalMs <= 0.0) return false;
 
-    // Normalize times to seconds relative to t0.
     std::vector<double> ts(n);
     std::vector<double> xs(n), ys(n), zs(n);
     for (size_t i = 0; i < n; ++i) {
@@ -1077,7 +1063,6 @@ static bool EstimateMotion(const MotionHistory& hist,
     accY = static_cast<float>(ay);
     accZ = static_cast<float>(az);
 
-    // Sanity: reject non-finite or unrealistic values.
     const float maxSpeed = AdaptiveTuning::kMaxSpeed;
     const float maxAccel = AdaptiveTuning::kMaxAccel;
     const float speed = std::sqrt(velX * velX + velY * velY + velZ * velZ);
@@ -1088,7 +1073,6 @@ static bool EstimateMotion(const MotionHistory& hist,
     return true;
 }
 
-// Apply velocity smoothing (EMA) to reduce noise from DMA jitter.
 static void SmoothMotionEstimate(int entityId,
     float& velX, float& velY, float& velZ,
     float& accX, float& accY, float& accZ)
@@ -1116,7 +1100,6 @@ static void SmoothMotionEstimate(int entityId,
     accZ = g_sAccZ[entityId] = accAlpha * accZ + (1.0f - accAlpha) * g_sAccZ[entityId];
 }
 
-// Compute adaptive prediction time (look-ahead) based on motion confidence.
 static float ComputeAdaptiveLeadMs(float speed, float accel, int sampleCount, int minHistory)
 {
     const float maxLeadMs = static_cast<float>(AdaptiveTuning::kMaxLeadMs);
@@ -1131,9 +1114,6 @@ static float ComputeAdaptiveLeadMs(float speed, float accel, int sampleCount, in
     return leadMs;
 }
 
-// Adaptive prediction: P(t) = P0 + V*t + 0.5*A*t^2 using tracked history.
-// Falls back to the legacy linear lead when acceleration is unreliable.
-// Returns true when a prediction point was written to out.
 static bool ApplyAdaptivePrediction(const Vector3& point, int entityId,
     const Vector3& position, std::uint64_t tickMs,
     float responseMs, Vector3& out, int& leadMs)
@@ -1192,7 +1172,6 @@ static bool ApplyAdaptivePrediction(const Vector3& point, int entityId,
     return true;
 }
 
-// Clear history for entities that have disappeared (bounds memory growth).
 static void PruneMotionHistory(std::uint64_t nowMs)
 {
     const std::uint64_t staleMs = static_cast<std::uint64_t>(AdaptiveTuning::kStaleMs);
@@ -1205,7 +1184,6 @@ static void PruneMotionHistory(std::uint64_t nowMs)
     }
 }
 
-// Reset all per-entity motion history (e.g. on session change).
 static void ResetMotionHistory()
 {
     g_motionHistory.clear();
@@ -2199,11 +2177,6 @@ void Tick()
         // prediction step so the next tick differentiates against this one.
         MotionSample& sample = g_motion[ent.entityId];
 
-        // Target Prediction (Issue #8): one switch, two modes.
-        //   Legacy  - fixed-strength linear lead (Lead Strength / Vertical Lead).
-        //   Adaptive- automatic velocity + acceleration tracking with
-        //             P(t) = P0 + V*t + 0.5*A*t^2, falling back to the linear
-        //             model when acceleration is unreliable.
         if (cfg.Prediction && cfg.PredictionMode == 1) {
             Vector3 adaptivePoint{};
             int adaptiveLeadMs = 0;
@@ -2223,8 +2196,6 @@ void Tick()
                 }
             }
         }
-        // Update the motion sample after the prediction step so the next tick
-        // differentiates against this one.
         sample.position = ent.position;
         sample.tickMs = nowMs;
         sample.valid = true;

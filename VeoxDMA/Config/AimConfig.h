@@ -145,13 +145,9 @@ public:
 	int PredictionStrength = 100; // percent, 0..200 => 0..2x lead
 	int PredictionYScale = 50;    // percent, 0..100 of the Y lead
 	// Prediction mode: 0 = Legacy (fixed linear lead), 1 = Adaptive
-	// (velocity + acceleration tracking). Adaptive is fully automatic.
 	int PredictionMode = 0;
 	bool HardLock = false;        // keep the current target outside the FOV
 	int TargetSwitchDelay = 200;  // ms before allowing a new target (0 = instant)
-	// --- Adaptive Target Prediction (Issue #8) --------------------------
-	// Adaptive mode is fully automatic and has no user-facing settings.
-	// Its internal tuning lives in AimController.cpp as fixed constants.
 
 	// --- Recoil / spread suppression ----------------------------------
 	bool NoRecoil = false;
@@ -347,8 +343,7 @@ public:
 		PredictionStrength = j[ConfigName].value(LIT("PredictionStrength"), PredictionStrength);
 		PredictionYScale = j[ConfigName].value(LIT("PredictionYScale"), PredictionYScale);
 		PredictionMode = j[ConfigName].value(LIT("PredictionMode"), PredictionMode);
-		// Back-compat: the old separate "Adaptive Prediction" toggle maps to
-		// PredictionMode = 1 (Adaptive).
+		// Support configs saved with the previous adaptive toggle.
 		if (j[ConfigName].value(LIT("AdaptivePredictionEnabled"), false))
 			PredictionMode = 1;
 		HardLock = j[ConfigName].value(LIT("HardLock"), HardLock);
