@@ -177,6 +177,9 @@ struct MotionHistory {
     std::deque<MotionHistoryEntry> samples{};
     std::uint64_t lastUpdateMs = 0;
     bool valid = false;
+    bool smoothingInitialized = false;
+    Vector3 smoothedVelocity{};
+    Vector3 smoothedAcceleration{};
 };
 std::unordered_map<int, MotionHistory> g_motionHistory;
 
@@ -962,6 +965,8 @@ constexpr float kAccelSmoothing  = 0.3f;
 constexpr float kMaxSpeed        = 15.0f;
 constexpr float kMaxAccel        = 60.0f;
 constexpr bool  kAllowFallback   = true;
+constexpr int   kFallbackStrengthPercent = 100;
+constexpr int   kFallbackYScalePercent = 50;
 constexpr int   kStaleMs         = 500;
 } // namespace AdaptiveTuning
 
@@ -1079,31 +1084,26 @@ static bool EstimateMotion(const MotionHistory& hist,
     return true;
 }
 
-static void SmoothMotionEstimate(int entityId,
+static void SmoothMotionEstimate(MotionHistory& hist,
     float& velX, float& velY, float& velZ,
     float& accX, float& accY, float& accZ)
 {
-    static thread_local std::unordered_map<int, bool> g_smoothInit{};
-    static thread_local std::unordered_map<int, float> g_sVelX{}, g_sVelY{}, g_sVelZ{};
-    static thread_local std::unordered_map<int, float> g_sAccX{}, g_sAccY{}, g_sAccZ{};
-
     const float velAlpha = AdaptiveTuning::kVelSmoothing;
     const float accAlpha = AdaptiveTuning::kAccelSmoothing;
 
-    bool& init = g_smoothInit[entityId];
-    if (!init) {
-        g_sVelX[entityId] = velX; g_sVelY[entityId] = velY; g_sVelZ[entityId] = velZ;
-        g_sAccX[entityId] = accX; g_sAccY[entityId] = accY; g_sAccZ[entityId] = accZ;
-        init = true;
+    if (!hist.smoothingInitialized) {
+        hist.smoothedVelocity = Vector3(velX, velY, velZ);
+        hist.smoothedAcceleration = Vector3(accX, accY, accZ);
+        hist.smoothingInitialized = true;
         return;
     }
 
-    velX = g_sVelX[entityId] = velAlpha * velX + (1.0f - velAlpha) * g_sVelX[entityId];
-    velY = g_sVelY[entityId] = velAlpha * velY + (1.0f - velAlpha) * g_sVelY[entityId];
-    velZ = g_sVelZ[entityId] = velAlpha * velZ + (1.0f - velAlpha) * g_sVelZ[entityId];
-    accX = g_sAccX[entityId] = accAlpha * accX + (1.0f - accAlpha) * g_sAccX[entityId];
-    accY = g_sAccY[entityId] = accAlpha * accY + (1.0f - accAlpha) * g_sAccY[entityId];
-    accZ = g_sAccZ[entityId] = accAlpha * accZ + (1.0f - accAlpha) * g_sAccZ[entityId];
+    velX = hist.smoothedVelocity.x = velAlpha * velX + (1.0f - velAlpha) * hist.smoothedVelocity.x;
+    velY = hist.smoothedVelocity.y = velAlpha * velY + (1.0f - velAlpha) * hist.smoothedVelocity.y;
+    velZ = hist.smoothedVelocity.z = velAlpha * velZ + (1.0f - velAlpha) * hist.smoothedVelocity.z;
+    accX = hist.smoothedAcceleration.x = accAlpha * accX + (1.0f - accAlpha) * hist.smoothedAcceleration.x;
+    accY = hist.smoothedAcceleration.y = accAlpha * accY + (1.0f - accAlpha) * hist.smoothedAcceleration.y;
+    accZ = hist.smoothedAcceleration.z = accAlpha * accZ + (1.0f - accAlpha) * hist.smoothedAcceleration.z;
 }
 
 static float ComputeAdaptiveLeadMs(float speed, float accel, int sampleCount, int minHistory)
@@ -1129,17 +1129,14 @@ static bool ApplyAdaptivePrediction(const Vector3& point, int entityId,
     float velX = 0.f, velY = 0.f, velZ = 0.f;
     float accX = 0.f, accY = 0.f, accZ = 0.f;
 
-    MotionHistory hist{};
     auto it = g_motionHistory.find(entityId);
     const bool haveHist = it != g_motionHistory.end() && it->second.valid;
-    if (haveHist) hist = it->second;
 
     bool accelReliable = false;
     if (haveHist) {
-        accelReliable = EstimateMotion(hist, velX, velY, velZ, accX, accY, accZ);
-        if (accelReliable) {
-            SmoothMotionEstimate(entityId, velX, velY, velZ, accX, accY, accZ);
-        }
+        accelReliable = EstimateMotion(it->second, velX, velY, velZ, accX, accY, accZ);
+        if (accelReliable)
+            SmoothMotionEstimate(it->second, velX, velY, velZ, accX, accY, accZ);
     }
 
     const int minHistory = AdaptiveTuning::kMinHistory;
@@ -1155,17 +1152,18 @@ static bool ApplyAdaptivePrediction(const Vector3& point, int entityId,
             point.y + velY * t + halfA * accY * t * t,
             point.z + velZ * t + halfA * accZ * t * t);
     } else if (AdaptiveTuning::kAllowFallback) {
-        if (haveHist && hist.samples.size() >= 2) {
-            const auto& newest = hist.samples.back();
-            const auto& prev = hist.samples[hist.samples.size() - 2];
+        if (haveHist && it->second.samples.size() >= 2) {
+            const auto& samples = it->second.samples;
+            const auto& newest = samples.back();
+            const auto& prev = samples[samples.size() - 2];
             const std::uint64_t sampleMs = newest.tickMs - prev.tickMs;
             if (sampleMs >= 4 && sampleMs <= 100) {
                 Vector3 lead{};
                 int legacyLeadMs = 0;
                 if (ApplyLeading(point, newest.position, prev.position,
                         sampleMs, responseMs,
-                        ConfigInstance.Aim.PredictionStrength,
-                        ConfigInstance.Aim.PredictionYScale, lead, legacyLeadMs)) {
+                        AdaptiveTuning::kFallbackStrengthPercent,
+                        AdaptiveTuning::kFallbackYScalePercent, lead, legacyLeadMs)) {
                     out = lead;
                     leadMsF = static_cast<float>(legacyLeadMs);
                 }
@@ -1575,6 +1573,8 @@ static void StopAimWorkerLocked()
     g_aimWorkerStop.store(true, std::memory_order_relaxed);
     if (g_aimWorkerThread.joinable())
         g_aimWorkerThread.join();
+    g_motion.clear();
+    ResetMotionHistory();
     ReleaseFireButton();
     g_triggerPhase = TriggerPhase::Idle;
     g_triggerDebugActive.store(false, std::memory_order_relaxed);
@@ -2184,7 +2184,7 @@ void Tick()
     // Bounded sample table: entity ids churn across matches, so drop stale
     // history rather than letting the map grow for the whole session.
     if (g_motion.size() > 512) g_motion.clear();
-        ResetMotionHistory();
+    PruneMotionHistory(nowMs);
 
     RejectedDebug closestRejected{};
     auto noteRejected = [&](const RobRunReader::EntityData& e, const char* why) {

@@ -49,10 +49,6 @@ struct DebugInfo {
 	bool triggerEnabled = false;
 	bool triggerActive = false;
 	const char* triggerState = "off";
-	bool adaptivePrediction = false;
-	float velocityX = 0.f, velocityY = 0.f, velocityZ = 0.f;
-	float accelerationX = 0.f, accelerationY = 0.f, accelerationZ = 0.f;
-	float predictionTimeMs = 0.f;
 };
 
 void Tick();
