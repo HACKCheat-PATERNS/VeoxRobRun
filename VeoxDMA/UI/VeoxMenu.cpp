@@ -1489,6 +1489,14 @@ void DrawAimGeneral()
 			SliderIntRow("Vertical Lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%");
 		}
 		ToggleRow("Hard Lock", &ConfigInstance.Aim.HardLock);
+		SectionLabel("Adaptive Prediction");
+		ToggleRow("Adaptive Prediction", &ConfigInstance.Aim.AdaptivePredictionEnabled);
+		if (ConfigInstance.Aim.AdaptivePredictionEnabled)
+		{
+			SliderIntRow("Max Lead", &ConfigInstance.Aim.AdaptivePredictionMaxLeadMs, 0, 250, " ms");
+			SliderIntRow("Min History", &ConfigInstance.Aim.AdaptivePredictionMinHistory, 1, 12, " samples");
+			ToggleRow("Linear Fallback", &ConfigInstance.Aim.AdaptivePredictionAllowFallback);
+		}
 		SliderIntRow("Switch Delay", &ConfigInstance.Aim.TargetSwitchDelay, 0, 1000, " ms");
 		EndCard();
 	}

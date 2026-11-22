@@ -146,6 +146,29 @@ public:
 	int PredictionYScale = 50;    // percent, 0..100 of the Y lead
 	bool HardLock = false;        // keep the current target outside the FOV
 	int TargetSwitchDelay = 200;  // ms before allowing a new target (0 = instant)
+	// --- Adaptive Target Prediction (Issue #8) --------------------------
+	// When true, uses adaptive prediction with velocity + acceleration tracking
+	// instead of the legacy fixed-strength linear lead.
+	bool AdaptivePredictionEnabled = false;
+	// Maximum adaptive look-ahead time in milliseconds (0..250). The actual
+	// prediction time adapts per target based on motion confidence.
+	int AdaptivePredictionMaxLeadMs = 80;
+	// Minimum number of history samples required to estimate acceleration.
+	int AdaptivePredictionMinHistory = 3;
+	// Maximum history entries kept per entity (bounds memory growth).
+	int AdaptivePredictionMaxHistory = 24;
+	// Velocity smoothing factor (0..1). Higher trusts new samples more.
+	float AdaptivePredictionVelocitySmoothing = 0.4f;
+	// Acceleration smoothing factor (0..1).
+	float AdaptivePredictionAccelSmoothing = 0.3f;
+	// Maximum speed (m/s) considered realistic; above this the sample is dropped.
+	float AdaptivePredictionMaxSpeed = 15.0f;
+	// Maximum acceleration (m/s^2) considered realistic; above this it is dropped.
+	float AdaptivePredictionMaxAccel = 60.0f;
+	// If acceleration cannot be estimated reliably, fall back to linear model.
+	bool AdaptivePredictionAllowFallback = true;
+	// Age (ms) after which a history entry is considered stale and dropped.
+	int AdaptivePredictionStaleMs = 500;
 
 	// --- Recoil / spread suppression ----------------------------------
 	bool NoRecoil = false;

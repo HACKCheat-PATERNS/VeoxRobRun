@@ -22,6 +22,7 @@
 #include <fstream>
 #include <random>
 #include <unordered_map>
+#include <deque>
 
 namespace Aim {
 
@@ -167,6 +168,19 @@ struct MotionSample {
     bool valid = false;
 };
 std::unordered_map<int, MotionSample> g_motion;
+// Per-entity motion history for adaptive target prediction (Issue #8).
+// Keeps a bounded ring of timestamped positions per entityId.
+struct MotionHistoryEntry {
+    Vector3 position{};
+    std::uint64_t tickMs = 0;
+    bool valid = false;
+};
+struct MotionHistory {
+    std::deque<MotionHistoryEntry> samples{};
+    std::uint64_t lastUpdateMs = 0;
+    bool valid = false;
+};
+std::unordered_map<int, MotionHistory> g_motionHistory;
 
 struct AimQuat {
     float x = 0.f, y = 0.f, z = 0.f, w = 1.f;
@@ -933,6 +947,255 @@ bool ApplyLeading(const Vector3& point, const Vector3& position,
 }
 
 } // namespace
+
+// ---- Adaptive Target Prediction (Issue #8) ----
+
+// Push a new position sample into the bounded per-entity history.
+// Returns the number of samples currently stored.
+static int PushMotionSample(int entityId, const Vector3& position, std::uint64_t tickMs)
+{
+    const int maxHistory = std::max(1, ConfigInstance.Aim.AdaptivePredictionMaxHistory);
+    const int minHistory = std::max(1, ConfigInstance.Aim.AdaptivePredictionMinHistory);
+    const std::uint64_t staleMs = static_cast<std::uint64_t>(ConfigInstance.Aim.AdaptivePredictionStaleMs);
+
+    MotionHistory& hist = g_motionHistory[entityId];
+    hist.samples.push_back(MotionHistoryEntry{ position, tickMs, true });
+    hist.lastUpdateMs = tickMs;
+    hist.valid = true;
+
+    // Bound memory: drop oldest samples beyond the limit.
+    while (static_cast<int>(hist.samples.size()) > maxHistory)
+        hist.samples.pop_front();
+
+    // Drop stale entries (older than staleMs relative to the newest sample).
+    while (hist.samples.size() > static_cast<size_t>(minHistory)) {
+        const std::uint64_t oldest = hist.samples.front().tickMs;
+        if (tickMs - oldest > staleMs)
+            hist.samples.pop_front();
+        else
+            break;
+    }
+
+    return static_cast<int>(hist.samples.size());
+}
+
+// Estimate velocity and acceleration from the bounded history using a
+// least-squares fit over the recent samples. Handles irregular timestamps.
+// Returns true when a reliable estimate is available.
+static bool EstimateMotion(const MotionHistory& hist,
+    float& velX, float& velY, float& velZ,
+    float& accX, float& accY, float& accZ)
+{
+    const size_t n = hist.samples.size();
+    const int minHistory = std::max(1, ConfigInstance.Aim.AdaptivePredictionMinHistory);
+    if (n < static_cast<size_t>(minHistory)) return false;
+
+    const std::uint64_t t0 = hist.samples.front().tickMs;
+    const std::uint64_t tn = hist.samples.back().tickMs;
+    const double totalMs = static_cast<double>(tn - t0);
+    if (totalMs <= 0.0) return false;
+
+    // Normalize times to seconds relative to t0.
+    std::vector<double> ts(n);
+    std::vector<double> xs(n), ys(n), zs(n);
+    for (size_t i = 0; i < n; ++i) {
+        ts[i] = static_cast<double>(hist.samples[i].tickMs - t0) * 0.001;
+        xs[i] = hist.samples[i].position.x;
+        ys[i] = hist.samples[i].position.y;
+        zs[i] = hist.samples[i].position.z;
+    }
+
+    // Least-squares fit: p(t) = p0 + v*t + 0.5*a*t^2
+    double S0 = 0, S1 = 0, S2 = 0, S3 = 0, S4 = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const double t = ts[i];
+        const double t2 = t * t;
+        S0 += 1.0;
+        S1 += t;
+        S2 += t2;
+        S3 += t2 * t;
+        S4 += t2 * t2;
+    }
+
+    const double det =
+        S0 * (S2 * S4 - S3 * S3) -
+        S1 * (S1 * S4 - S3 * S2) +
+        S2 * (S1 * S3 - S2 * S2);
+    if (std::fabs(det) < 1.0e-12) return false;
+
+    auto SolveAxis = [&](const std::vector<double>& vals, double& vOut, double& aOut) {
+        double Sy = 0, Svy = 0, Sa2 = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const double t = ts[i];
+            const double t2 = t * t;
+            Sy += vals[i];
+            Svy += vals[i] * t;
+            Sa2 += vals[i] * t2;
+        }
+        const double M00 = S0, M01 = S1, M02 = S2;
+        const double M10 = S1, M11 = S2, M12 = S3;
+        const double M20 = S2, M21 = S3, M22 = S4;
+        const double rhs0 = Sy, rhs1 = Svy, rhs2 = Sa2;
+
+        const double d1 =
+            rhs0 * (M11 * M22 - M12 * M21) -
+            M01 * (rhs1 * M22 - M12 * rhs2) +
+            M02 * (rhs1 * M21 - M11 * rhs2);
+        const double d2 =
+            M00 * (rhs1 * M22 - M12 * rhs2) -
+            rhs0 * (M10 * M22 - M12 * rhs2) +
+            M02 * (M10 * rhs2 - rhs1 * M20);
+
+        vOut = d1 / det;
+        aOut = 2.0 * (d2 / det);
+    };
+
+    double vx = 0, ax = 0, vy = 0, ay = 0, vz = 0, az = 0;
+    SolveAxis(xs, vx, ax);
+    SolveAxis(ys, vy, ay);
+    SolveAxis(zs, vz, az);
+
+    velX = static_cast<float>(vx);
+    velY = static_cast<float>(vy);
+    velZ = static_cast<float>(vz);
+    accX = static_cast<float>(ax);
+    accY = static_cast<float>(ay);
+    accZ = static_cast<float>(az);
+
+    // Sanity: reject non-finite or unrealistic values.
+    const float maxSpeed = ConfigInstance.Aim.AdaptivePredictionMaxSpeed;
+    const float maxAccel = ConfigInstance.Aim.AdaptivePredictionMaxAccel;
+    const float speed = std::sqrt(velX * velX + velY * velY + velZ * velZ);
+    const float accel = std::sqrt(accX * accX + accY * accY + accZ * accZ);
+    if (!std::isfinite(speed) || !std::isfinite(accel)) return false;
+    if (speed > maxSpeed || accel > maxAccel) return false;
+
+    return true;
+}
+
+// Apply velocity smoothing (EMA) to reduce noise from DMA jitter.
+static void SmoothMotionEstimate(int entityId,
+    float& velX, float& velY, float& velZ,
+    float& accX, float& accY, float& accZ)
+{
+    static thread_local std::unordered_map<int, bool> g_smoothInit{};
+    static thread_local std::unordered_map<int, float> g_sVelX{}, g_sVelY{}, g_sVelZ{};
+    static thread_local std::unordered_map<int, float> g_sAccX{}, g_sAccY{}, g_sAccZ{};
+
+    const float velAlpha = std::clamp(ConfigInstance.Aim.AdaptivePredictionVelocitySmoothing, 0.0f, 1.0f);
+    const float accAlpha = std::clamp(ConfigInstance.Aim.AdaptivePredictionAccelSmoothing, 0.0f, 1.0f);
+
+    bool& init = g_smoothInit[entityId];
+    if (!init) {
+        g_sVelX[entityId] = velX; g_sVelY[entityId] = velY; g_sVelZ[entityId] = velZ;
+        g_sAccX[entityId] = accX; g_sAccY[entityId] = accY; g_sAccZ[entityId] = accZ;
+        init = true;
+        return;
+    }
+
+    velX = g_sVelX[entityId] = velAlpha * velX + (1.0f - velAlpha) * g_sVelX[entityId];
+    velY = g_sVelY[entityId] = velAlpha * velY + (1.0f - velAlpha) * g_sVelY[entityId];
+    velZ = g_sVelZ[entityId] = velAlpha * velZ + (1.0f - velAlpha) * g_sVelZ[entityId];
+    accX = g_sAccX[entityId] = accAlpha * accX + (1.0f - accAlpha) * g_sAccX[entityId];
+    accY = g_sAccY[entityId] = accAlpha * accY + (1.0f - accAlpha) * g_sAccY[entityId];
+    accZ = g_sAccZ[entityId] = accAlpha * accZ + (1.0f - accAlpha) * g_sAccZ[entityId];
+}
+
+// Compute adaptive prediction time (look-ahead) based on motion confidence.
+static float ComputeAdaptiveLeadMs(float speed, float accel, int sampleCount, int minHistory)
+{
+    const float maxLeadMs = static_cast<float>(ConfigInstance.Aim.AdaptivePredictionMaxLeadMs);
+    if (maxLeadMs <= 0.f) return 0.f;
+
+    const float confidence = static_cast<float>(sampleCount) / static_cast<float>(std::max(1, minHistory));
+    const float confLead = maxLeadMs * (1.0f - std::clamp(confidence, 0.0f, 1.0f)) * 0.6f;
+    const float speedLead = std::min(speed * 6.0f, maxLeadMs * 0.5f);
+
+    float leadMs = std::min(confLead + speedLead, maxLeadMs);
+    leadMs = std::max(leadMs, 4.0f);
+    return leadMs;
+}
+
+// Adaptive prediction: P(t) = P0 + V*t + 0.5*A*t^2 using tracked history.
+// Falls back to the legacy linear lead when acceleration is unreliable.
+// Returns true when a prediction point was written to out.
+static bool ApplyAdaptivePrediction(const Vector3& point, int entityId,
+    const Vector3& position, std::uint64_t tickMs,
+    float responseMs, Vector3& out, int& leadMs)
+{
+    const int sampleCount = PushMotionSample(entityId, position, tickMs);
+
+    float velX = 0.f, velY = 0.f, velZ = 0.f;
+    float accX = 0.f, accY = 0.f, accZ = 0.f;
+
+    MotionHistory hist{};
+    auto it = g_motionHistory.find(entityId);
+    const bool haveHist = it != g_motionHistory.end() && it->second.valid;
+    if (haveHist) hist = it->second;
+
+    bool accelReliable = false;
+    if (haveHist) {
+        accelReliable = EstimateMotion(hist, velX, velY, velZ, accX, accY, accZ);
+        if (accelReliable) {
+            SmoothMotionEstimate(entityId, velX, velY, velZ, accX, accY, accZ);
+        }
+    }
+
+    const int minHistory = std::max(1, ConfigInstance.Aim.AdaptivePredictionMinHistory);
+    const float speed = std::sqrt(velX * velX + velY * velY + velZ * velZ);
+
+    float leadMsF = 0.f;
+    if (accelReliable) {
+        leadMsF = ComputeAdaptiveLeadMs(speed, std::sqrt(accX*accX + accY*accY + accZ*accZ), sampleCount, minHistory);
+        const float t = leadMsF * 0.001f;
+        const float halfA = 0.5f;
+        out = Vector3(
+            point.x + velX * t + halfA * accX * t * t,
+            point.y + velY * t + halfA * accY * t * t,
+            point.z + velZ * t + halfA * accZ * t * t);
+    } else if (ConfigInstance.Aim.AdaptivePredictionAllowFallback) {
+        if (haveHist && hist.samples.size() >= 2) {
+            const auto& newest = hist.samples.back();
+            const auto& prev = hist.samples[hist.samples.size() - 2];
+            const std::uint64_t sampleMs = newest.tickMs - prev.tickMs;
+            if (sampleMs >= 4 && sampleMs <= 100) {
+                Vector3 lead{};
+                int legacyLeadMs = 0;
+                if (ApplyLeading(point, newest.position, prev.position,
+                        sampleMs, responseMs,
+                        ConfigInstance.Aim.PredictionStrength,
+                        ConfigInstance.Aim.PredictionYScale, lead, legacyLeadMs)) {
+                    out = lead;
+                    leadMsF = static_cast<float>(legacyLeadMs);
+                }
+            }
+        }
+    }
+
+    if (leadMsF <= 0.f) return false;
+    leadMs = static_cast<int>(leadMsF);
+    return true;
+}
+
+// Clear history for entities that have disappeared (bounds memory growth).
+static void PruneMotionHistory(std::uint64_t nowMs)
+{
+    const std::uint64_t staleMs = static_cast<std::uint64_t>(ConfigInstance.Aim.AdaptivePredictionStaleMs);
+    for (auto it = g_motionHistory.begin(); it != g_motionHistory.end(); ) {
+        if (nowMs - it->second.lastUpdateMs > staleMs) {
+            it = g_motionHistory.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// Reset all per-entity motion history (e.g. on session change).
+static void ResetMotionHistory()
+{
+    g_motionHistory.clear();
+}
+
 
 const char* const* KeyNames() { return kKeyNames; }
 int KeyCount() { return kKeyCount; }
@@ -1761,6 +2024,7 @@ void Tick()
         resetSmoothing();
         g_lastTarget = -1;
         g_motion.clear();
+        ResetMotionHistory();
         return;
     }
 
@@ -1779,6 +2043,7 @@ void Tick()
         resetSmoothing();
         g_lastTarget = -1;
         g_motion.clear();
+        ResetMotionHistory();
         g_writeBlockedUntil = GetTickCount64() + 1000;
     }
 
@@ -1846,6 +2111,7 @@ void Tick()
     // Bounded sample table: entity ids churn across matches, so drop stale
     // history rather than letting the map grow for the whole session.
     if (g_motion.size() > 512) g_motion.clear();
+        ResetMotionHistory();
 
     for (const auto& ent : snapshot->entities) {
         if (ent.entityId == snapshot->localEntityId) continue;
@@ -1917,7 +2183,19 @@ void Tick()
         // Leading uses the previous feet sample. Update the sample after the
         // prediction step so the next tick differentiates against this one.
         MotionSample& sample = g_motion[ent.entityId];
-        if (cfg.Prediction && sample.valid && sample.tickMs != 0) {
+
+        // Adaptive Target Prediction (Issue #8): when enabled, uses velocity +
+        // acceleration tracking with P(t) = P0 + V*t + 0.5*A*t^2, falling back
+        // to the legacy linear lead when acceleration is unreliable.
+        if (cfg.AdaptivePredictionEnabled) {
+            Vector3 adaptivePoint{};
+            int adaptiveLeadMs = 0;
+            if (ApplyAdaptivePrediction(point, ent.entityId, ent.position, nowMs,
+                    responseMs, adaptivePoint, adaptiveLeadMs)) {
+                point = adaptivePoint;
+                leadMs = adaptiveLeadMs;
+            }
+        } else if (cfg.Prediction && sample.valid && sample.tickMs != 0) {
             const std::uint64_t sampleMs = nowMs - sample.tickMs;
             if (sampleMs >= 4 && sampleMs <= 100) {
                 Vector3 lead;
@@ -1928,6 +2206,8 @@ void Tick()
                 }
             }
         }
+        // Update the motion sample after the prediction step so the next tick
+        // differentiates against this one.
         sample.position = ent.position;
         sample.tickMs = nowMs;
         sample.valid = true;
