@@ -950,13 +950,28 @@ bool ApplyLeading(const Vector3& point, const Vector3& position,
 
 // ---- Adaptive Target Prediction (Issue #8) ----
 
+// Adaptive mode is fully automatic: these fixed constants replace the old
+// user-facing "Advanced" knobs. They are not exposed in the UI and cannot be
+// changed from the config file.
+namespace AdaptiveTuning {
+constexpr int   kMaxLeadMs       = 80;    // upper bound of the automatic look-ahead
+constexpr int   kMinHistory      = 3;     // samples needed before acceleration is trusted
+constexpr int   kMaxHistory      = 24;    // retained samples per entity (memory bound)
+constexpr float kVelSmoothing    = 0.4f;  // EMA factor for velocity
+constexpr float kAccelSmoothing  = 0.3f;  // EMA factor for acceleration
+constexpr float kMaxSpeed        = 15.0f; // m/s, samples above this are rejected
+constexpr float kMaxAccel        = 60.0f; // m/s^2, samples above this are rejected
+constexpr bool  kAllowFallback   = true;  // use the linear model when accel is unreliable
+constexpr int   kStaleMs         = 500;   // age after which a sample is dropped
+} // namespace AdaptiveTuning
+
 // Push a new position sample into the bounded per-entity history.
 // Returns the number of samples currently stored.
 static int PushMotionSample(int entityId, const Vector3& position, std::uint64_t tickMs)
 {
-    const int maxHistory = std::max(1, ConfigInstance.Aim.AdaptivePredictionMaxHistory);
-    const int minHistory = std::max(1, ConfigInstance.Aim.AdaptivePredictionMinHistory);
-    const std::uint64_t staleMs = static_cast<std::uint64_t>(ConfigInstance.Aim.AdaptivePredictionStaleMs);
+    const int maxHistory = AdaptiveTuning::kMaxHistory;
+    const int minHistory = AdaptiveTuning::kMinHistory;
+    const std::uint64_t staleMs = static_cast<std::uint64_t>(AdaptiveTuning::kStaleMs);
 
     MotionHistory& hist = g_motionHistory[entityId];
     hist.samples.push_back(MotionHistoryEntry{ position, tickMs, true });
@@ -987,7 +1002,7 @@ static bool EstimateMotion(const MotionHistory& hist,
     float& accX, float& accY, float& accZ)
 {
     const size_t n = hist.samples.size();
-    const int minHistory = std::max(1, ConfigInstance.Aim.AdaptivePredictionMinHistory);
+    const int minHistory = AdaptiveTuning::kMinHistory;
     if (n < static_cast<size_t>(minHistory)) return false;
 
     const std::uint64_t t0 = hist.samples.front().tickMs;
@@ -1063,8 +1078,8 @@ static bool EstimateMotion(const MotionHistory& hist,
     accZ = static_cast<float>(az);
 
     // Sanity: reject non-finite or unrealistic values.
-    const float maxSpeed = ConfigInstance.Aim.AdaptivePredictionMaxSpeed;
-    const float maxAccel = ConfigInstance.Aim.AdaptivePredictionMaxAccel;
+    const float maxSpeed = AdaptiveTuning::kMaxSpeed;
+    const float maxAccel = AdaptiveTuning::kMaxAccel;
     const float speed = std::sqrt(velX * velX + velY * velY + velZ * velZ);
     const float accel = std::sqrt(accX * accX + accY * accY + accZ * accZ);
     if (!std::isfinite(speed) || !std::isfinite(accel)) return false;
@@ -1082,8 +1097,8 @@ static void SmoothMotionEstimate(int entityId,
     static thread_local std::unordered_map<int, float> g_sVelX{}, g_sVelY{}, g_sVelZ{};
     static thread_local std::unordered_map<int, float> g_sAccX{}, g_sAccY{}, g_sAccZ{};
 
-    const float velAlpha = std::clamp(ConfigInstance.Aim.AdaptivePredictionVelocitySmoothing, 0.0f, 1.0f);
-    const float accAlpha = std::clamp(ConfigInstance.Aim.AdaptivePredictionAccelSmoothing, 0.0f, 1.0f);
+    const float velAlpha = AdaptiveTuning::kVelSmoothing;
+    const float accAlpha = AdaptiveTuning::kAccelSmoothing;
 
     bool& init = g_smoothInit[entityId];
     if (!init) {
@@ -1104,7 +1119,7 @@ static void SmoothMotionEstimate(int entityId,
 // Compute adaptive prediction time (look-ahead) based on motion confidence.
 static float ComputeAdaptiveLeadMs(float speed, float accel, int sampleCount, int minHistory)
 {
-    const float maxLeadMs = static_cast<float>(ConfigInstance.Aim.AdaptivePredictionMaxLeadMs);
+    const float maxLeadMs = static_cast<float>(AdaptiveTuning::kMaxLeadMs);
     if (maxLeadMs <= 0.f) return 0.f;
 
     const float confidence = static_cast<float>(sampleCount) / static_cast<float>(std::max(1, minHistory));
@@ -1141,7 +1156,7 @@ static bool ApplyAdaptivePrediction(const Vector3& point, int entityId,
         }
     }
 
-    const int minHistory = std::max(1, ConfigInstance.Aim.AdaptivePredictionMinHistory);
+    const int minHistory = AdaptiveTuning::kMinHistory;
     const float speed = std::sqrt(velX * velX + velY * velY + velZ * velZ);
 
     float leadMsF = 0.f;
@@ -1153,7 +1168,7 @@ static bool ApplyAdaptivePrediction(const Vector3& point, int entityId,
             point.x + velX * t + halfA * accX * t * t,
             point.y + velY * t + halfA * accY * t * t,
             point.z + velZ * t + halfA * accZ * t * t);
-    } else if (ConfigInstance.Aim.AdaptivePredictionAllowFallback) {
+    } else if (AdaptiveTuning::kAllowFallback) {
         if (haveHist && hist.samples.size() >= 2) {
             const auto& newest = hist.samples.back();
             const auto& prev = hist.samples[hist.samples.size() - 2];
@@ -1180,7 +1195,7 @@ static bool ApplyAdaptivePrediction(const Vector3& point, int entityId,
 // Clear history for entities that have disappeared (bounds memory growth).
 static void PruneMotionHistory(std::uint64_t nowMs)
 {
-    const std::uint64_t staleMs = static_cast<std::uint64_t>(ConfigInstance.Aim.AdaptivePredictionStaleMs);
+    const std::uint64_t staleMs = static_cast<std::uint64_t>(AdaptiveTuning::kStaleMs);
     for (auto it = g_motionHistory.begin(); it != g_motionHistory.end(); ) {
         if (nowMs - it->second.lastUpdateMs > staleMs) {
             it = g_motionHistory.erase(it);
@@ -2184,10 +2199,12 @@ void Tick()
         // prediction step so the next tick differentiates against this one.
         MotionSample& sample = g_motion[ent.entityId];
 
-        // Adaptive Target Prediction (Issue #8): when enabled, uses velocity +
-        // acceleration tracking with P(t) = P0 + V*t + 0.5*A*t^2, falling back
-        // to the legacy linear lead when acceleration is unreliable.
-        if (cfg.AdaptivePredictionEnabled) {
+        // Target Prediction (Issue #8): one switch, two modes.
+        //   Legacy  - fixed-strength linear lead (Lead Strength / Vertical Lead).
+        //   Adaptive- automatic velocity + acceleration tracking with
+        //             P(t) = P0 + V*t + 0.5*A*t^2, falling back to the linear
+        //             model when acceleration is unreliable.
+        if (cfg.Prediction && cfg.PredictionMode == 1) {
             Vector3 adaptivePoint{};
             int adaptiveLeadMs = 0;
             if (ApplyAdaptivePrediction(point, ent.entityId, ent.position, nowMs,

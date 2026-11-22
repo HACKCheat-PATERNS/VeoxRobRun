@@ -144,31 +144,14 @@ public:
 	bool Prediction = false;
 	int PredictionStrength = 100; // percent, 0..200 => 0..2x lead
 	int PredictionYScale = 50;    // percent, 0..100 of the Y lead
+	// Prediction mode: 0 = Legacy (fixed linear lead), 1 = Adaptive
+	// (velocity + acceleration tracking). Adaptive is fully automatic.
+	int PredictionMode = 0;
 	bool HardLock = false;        // keep the current target outside the FOV
 	int TargetSwitchDelay = 200;  // ms before allowing a new target (0 = instant)
 	// --- Adaptive Target Prediction (Issue #8) --------------------------
-	// When true, uses adaptive prediction with velocity + acceleration tracking
-	// instead of the legacy fixed-strength linear lead.
-	bool AdaptivePredictionEnabled = false;
-	// Maximum adaptive look-ahead time in milliseconds (0..250). The actual
-	// prediction time adapts per target based on motion confidence.
-	int AdaptivePredictionMaxLeadMs = 80;
-	// Minimum number of history samples required to estimate acceleration.
-	int AdaptivePredictionMinHistory = 3;
-	// Maximum history entries kept per entity (bounds memory growth).
-	int AdaptivePredictionMaxHistory = 24;
-	// Velocity smoothing factor (0..1). Higher trusts new samples more.
-	float AdaptivePredictionVelocitySmoothing = 0.4f;
-	// Acceleration smoothing factor (0..1).
-	float AdaptivePredictionAccelSmoothing = 0.3f;
-	// Maximum speed (m/s) considered realistic; above this the sample is dropped.
-	float AdaptivePredictionMaxSpeed = 15.0f;
-	// Maximum acceleration (m/s^2) considered realistic; above this it is dropped.
-	float AdaptivePredictionMaxAccel = 60.0f;
-	// If acceleration cannot be estimated reliably, fall back to linear model.
-	bool AdaptivePredictionAllowFallback = true;
-	// Age (ms) after which a history entry is considered stale and dropped.
-	int AdaptivePredictionStaleMs = 500;
+	// Adaptive mode is fully automatic and has no user-facing settings.
+	// Its internal tuning lives in AimController.cpp as fixed constants.
 
 	// --- Recoil / spread suppression ----------------------------------
 	bool NoRecoil = false;
@@ -280,6 +263,7 @@ public:
 		j[ConfigName][LIT("Prediction")] = Prediction;
 		j[ConfigName][LIT("PredictionStrength")] = PredictionStrength;
 		j[ConfigName][LIT("PredictionYScale")] = PredictionYScale;
+		j[ConfigName][LIT("PredictionMode")] = PredictionMode;
 		j[ConfigName][LIT("HardLock")] = HardLock;
 		j[ConfigName][LIT("TargetSwitchDelay")] = TargetSwitchDelay;
 		j[ConfigName][LIT("NoRecoil")] = NoRecoil;
@@ -362,6 +346,11 @@ public:
 		Prediction = j[ConfigName].value(LIT("Prediction"), Prediction);
 		PredictionStrength = j[ConfigName].value(LIT("PredictionStrength"), PredictionStrength);
 		PredictionYScale = j[ConfigName].value(LIT("PredictionYScale"), PredictionYScale);
+		PredictionMode = j[ConfigName].value(LIT("PredictionMode"), PredictionMode);
+		// Back-compat: the old separate "Adaptive Prediction" toggle maps to
+		// PredictionMode = 1 (Adaptive).
+		if (j[ConfigName].value(LIT("AdaptivePredictionEnabled"), false))
+			PredictionMode = 1;
 		HardLock = j[ConfigName].value(LIT("HardLock"), HardLock);
 		TargetSwitchDelay = j[ConfigName].value(LIT("TargetSwitchDelay"), TargetSwitchDelay);
 		NoRecoil = j[ConfigName].value(LIT("NoRecoil"), NoRecoil);
