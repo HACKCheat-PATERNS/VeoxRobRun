@@ -565,15 +565,21 @@ bool Finite(const Vector3& v)
 // fallbacks so the aim filter and the overlay never disagree about a target.
 // The teammate filter is party based: the reader resolves the local party's
 // member ids and marks each entity, so same-role strangers stay targetable.
-bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg)
+const char* RoleSkipReason(const RobRunReader::EntityData& ent, const AimConfig& cfg)
 {
     const std::string role = RobRunReader::RoleLabel(ent.role, ent.roleName);
-    if (cfg.ExpIgnorePolice && role == "Police Officer") return true;
-    if (cfg.ExpIgnoreCriminal && role == "Criminal") return true;
-    if (cfg.ExpIgnoreCivilian && role == "Civilian") return true;
-    if (cfg.ExpIgnoreTeammates && (ent.isPartyMember || ent.isClanMate)) return true;
-    if (cfg.IsTrusted(ent.publicId)) return true;
-    return false;
+    if (cfg.ExpIgnorePolice && role == "Police Officer") return "role:police";
+    if (cfg.ExpIgnoreCriminal && role == "Criminal") return "role:criminal";
+    if (cfg.ExpIgnoreCivilian && role == "Civilian") return "role:civilian";
+    if (cfg.ExpIgnoreTeammates && ent.isPartyMember) return "team:party";
+    if (cfg.ExpIgnoreTeammates && ent.isClanMate) return "team:clan";
+    if (cfg.IsTrusted(ent.publicId)) return "trusted";
+    return nullptr;
+}
+
+bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg)
+{
+    return RoleSkipReason(ent, cfg) != nullptr;
 }
 
 Vector3 BonePoint(const RobRunReader::EntityData& ent, int bone)
@@ -586,10 +592,10 @@ Vector3 BonePoint(const RobRunReader::EntityData& ent, int bone)
         Vector3 point{};
         bool have = false;
         switch (bone) {
-        case 0: point = points.head;   have = true; break;
-        case 1: point = points.neck;   have = true; break;
-        case 2: point = points.chest;  have = true; break;
-        case 3: point = points.pelvis; have = true; break;
+        case 0: point = points.head;   have = points.hasHead;   break;
+        case 1: point = points.neck;   have = points.hasNeck;   break;
+        case 2: point = points.chest;  have = points.hasChest;  break;
+        case 3: point = points.pelvis; have = points.hasPelvis; break;
         default: break;
         }
         // A stale or mis-resolved rig layout can point a bone at the world
@@ -1239,6 +1245,16 @@ int ClassifyWeaponName(const std::string& weaponNameUtf8)
 }
 static std::atomic<float> g_displayWidth{ 1920.f };
 static std::atomic<float> g_displayHeight{ 1080.f };
+struct RejectedDebug {
+    int entityId = -1;
+    float screenDist = 1.0e9f;
+    std::string role;
+    const char* reason = "none";
+    bool rigValid = false;
+    bool hasHead = false;
+};
+static RejectedDebug g_lastRejected{};
+
 static std::mutex g_debugMutex;
 static std::mutex g_workerLifecycleMutex;
 static std::atomic<bool> g_aimWorkerStop{ false };
@@ -1419,13 +1435,20 @@ static void TickInstantLoot()
         PatchRevealDescriptions(revealDescs);
 }
 
+static bool CanSafelyWriteSession(const RobRunReader::SnapshotPtr& snap, std::uint64_t now);
+static bool ReadPtrFreshSafe(std::uintptr_t addr, std::uintptr_t& out);
+
 static void TickInstantUnlock()
 {
     if (!ConfigInstance.World.InstantUnlock) return;
     const auto snap = RobRunReader::GetSnapshot();
-    if (!snap || snap->battleModel <= 0x10000 || snap->battleEntities <= 0x10000) return;
+    const std::uint64_t now = GetTickCount64();
+    if (!CanSafelyWriteSession(snap, now)) return;
 
-    const std::uintptr_t worldEnts = snap->battleEntities;
+    std::uintptr_t worldEnts = 0;
+    if (!ReadPtrFreshSafe(snap->battleModel + rr::BattleModel::BattleEntitiesModel, worldEnts) ||
+        worldEnts != snap->battleEntities)
+        return;
 
     // 1. Safe doors within range
     std::vector<RobRunMemory::DictEntry> safeDoors;
@@ -1486,14 +1509,61 @@ static void TickInstantUnlock()
     }
 }
 
+struct CustomCameraState {
+    std::uintptr_t cameraModel = 0;
+    std::uint64_t sessionGen = 0;
+    float originalDistance = 0.f;
+    bool captured = false;
+    bool applied = false;
+};
+static CustomCameraState g_customCam;
+
 static void TickCustomCamera()
 {
-    if (!ConfigInstance.Overlay.CustomCameraDistance) return;
     const auto snap = RobRunReader::GetSnapshot();
-    if (!snap || snap->cameraModel <= 0x10000) return;
+    const std::uint64_t now = GetTickCount64();
+
+    // Never write into a camera from a previous session — Unity frees it on map switch.
+    if (!snap || snap->sessionGeneration != g_customCam.sessionGen) {
+        g_customCam = CustomCameraState{};
+        if (snap) g_customCam.sessionGen = snap->sessionGeneration;
+    }
+
+    if (!ConfigInstance.Overlay.CustomCameraDistance) {
+        if (g_customCam.applied && g_customCam.captured &&
+            CanSafelyWriteSession(snap, now) && snap->cameraModel == g_customCam.cameraModel) {
+            std::uintptr_t liveCam = 0;
+            if (ReadPtrFreshSafe(snap->battleModel + rr::BattleModel::BattleCameraModel, liveCam) &&
+                liveCam == g_customCam.cameraModel) {
+                TargetProcess.Write(g_customCam.cameraModel + rr::BattleCameraModelOffsets::Distance,
+                    g_customCam.originalDistance);
+            }
+        }
+        g_customCam.applied = false;
+        return;
+    }
+
+    if (!CanSafelyWriteSession(snap, now)) return;
+
+    std::uintptr_t liveCam = 0;
+    if (!ReadPtrFreshSafe(snap->battleModel + rr::BattleModel::BattleCameraModel, liveCam) ||
+        liveCam != snap->cameraModel)
+        return;
+
+    if (!g_customCam.captured || g_customCam.cameraModel != liveCam) {
+        float curDist = 0.f;
+        if (!RobRunMemory::ReadBytesFresh(liveCam + rr::BattleCameraModelOffsets::Distance, &curDist, sizeof(curDist)) ||
+            !std::isfinite(curDist) || curDist < 0.2f || curDist > 30.f)
+            return;
+        g_customCam.cameraModel = liveCam;
+        g_customCam.sessionGen = snap->sessionGeneration;
+        g_customCam.originalDistance = curDist;
+        g_customCam.captured = true;
+    }
 
     const float targetDistance = std::clamp(ConfigInstance.Overlay.CameraDistance, 1.0f, 15.0f);
-    TargetProcess.Write(snap->cameraModel + rr::BattleCameraModelOffsets::Distance, targetDistance);
+    TargetProcess.Write(liveCam + rr::BattleCameraModelOffsets::Distance, targetDistance);
+    g_customCam.applied = true;
 }
 
 static void StartRecoilWorkerLocked();
@@ -1969,8 +2039,14 @@ void Tick()
         g_lastVerdict = "-";
     };
 
+    auto clearLastRejected = []() {
+        std::lock_guard<std::mutex> lk(g_debugMutex);
+        g_lastRejected = RejectedDebug{};
+    };
+
     if (!cfg.Enabled) {
         dbg.reason = "aim disabled";
+        clearLastRejected();
         stopAiming();
         resetSmoothing();
         g_lastTarget = -1;
@@ -1978,6 +2054,7 @@ void Tick()
     }
     if (ConfigInstance.Overlay.PanicMode) {
         dbg.reason = "panic active";
+        clearLastRejected();
         stopAiming();
         resetSmoothing();
         g_lastTarget = -1;
@@ -1985,6 +2062,7 @@ void Tick()
     }
     if (Overlay::MenuOpen()) {
         dbg.reason = "menu open";
+        clearLastRejected();
         stopAiming();
         resetSmoothing();
         g_lastTarget = -1;
@@ -2013,6 +2091,7 @@ void Tick()
     dbg.keySource = keySource;
     if (!dbg.held) {
         dbg.reason = "aim key not held";
+        clearLastRejected();
         stopAiming();
         resetSmoothing();
         g_lastTarget = -1;
@@ -2023,6 +2102,7 @@ void Tick()
 
     if (!snapshot || snapshot->entities.empty()) {
         dbg.reason = "no entities";
+        clearLastRejected();
         stopAiming();
         return;
     }
@@ -2106,17 +2186,36 @@ void Tick()
     if (g_motion.size() > 512) g_motion.clear();
         ResetMotionHistory();
 
+    RejectedDebug closestRejected{};
+    auto noteRejected = [&](const RobRunReader::EntityData& e, const char* why) {
+        Vector2 sc{};
+        const Vector3 probe = Vector3(e.position.x, e.position.y + 1.25f, e.position.z);
+        if (!RobRunReader::ProjectWorld(viewProjection, probe, width, height, sc)) return;
+        const float d = std::hypot(sc.x - centerX, sc.y - centerY);
+        if (d < closestRejected.screenDist) {
+            closestRejected.entityId = e.entityId;
+            closestRejected.screenDist = d;
+            closestRejected.role = RobRunReader::RoleLabel(e.role, e.roleName);
+            closestRejected.reason = why;
+            closestRejected.rigValid = e.bonePoints.valid;
+            closestRejected.hasHead = e.bonePoints.hasHead;
+        }
+    };
+
     for (const auto& ent : snapshot->entities) {
         if (ent.entityId == snapshot->localEntityId) continue;
-        if (ent.isDead) continue;
-        if (cfg.SkipKnocked && (ent.isKnockedDown || ent.isKnockedOut)) continue;
-        if (ShouldSkipByRole(ent, cfg)) continue;
+        if (ent.isDead) { noteRejected(ent, "dead"); continue; }
+        if (cfg.SkipKnocked && (ent.isKnockedDown || ent.isKnockedOut)) {
+            noteRejected(ent, ent.isKnockedDown ? "knocked(kd)" : "knocked(ko)");
+            continue;
+        }
+        if (const char* roleWhy = RoleSkipReason(ent, cfg)) { noteRejected(ent, roleWhy); continue; }
         // When BVH is loaded, let the live per-bone IsCameraOccluded check below
         // evaluate Head/Neck/Chest/Pelvis directly instead of pre-rejecting on a
         // potentially stale snapshot ent.visible flag.
-        if (cfg.VisibleBonesOnly && !bvhLoaded && !ent.visible) continue;
+        if (cfg.VisibleBonesOnly && !bvhLoaded && !ent.visible) { noteRejected(ent, "vis(no-bvh)"); continue; }
         if (haveLocalPosition &&
-            Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) continue;
+            Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) { noteRejected(ent, "max-dist"); continue; }
 
         int activeBone = eff.targetBone;
         Vector3 point{};
@@ -2140,7 +2239,7 @@ void Tick()
                 }
             }
             if (!bestBoneFound) {
-                if (cfg.VisibleBonesOnly && bvhLoaded) continue;
+                if (cfg.VisibleBonesOnly && bvhLoaded) { noteRejected(ent, "vis(all-bones)"); continue; }
                 point = BonePoint(ent, 2);
             }
         } else {
@@ -2167,7 +2266,7 @@ void Tick()
                             break;
                         }
                     }
-                    if (!altFound) continue;
+                    if (!altFound) { noteRejected(ent, "vis(all-bones)"); continue; }
                 }
             }
         }
@@ -2218,7 +2317,7 @@ void Tick()
         // Hard lock: the sticky target keeps its pick even when it leaves the
         // FOV ring, mirroring the reference's locked-target behaviour.
         const bool isLocked = cfg.HardLock && ent.entityId == g_lastTarget;
-        if (!isLocked && distance > radiusPixels) continue;
+        if (!isLocked && distance > radiusPixels) { noteRejected(ent, "outside-fov"); continue; }
         ++dbg.candidates;
 
         if (isLocked) {
@@ -2250,7 +2349,24 @@ void Tick()
         }
     }
 
+    // Publish closest rejected target for Aim Debug HUD diagnostics (Issue #11)
+    {
+        std::lock_guard<std::mutex> lk(g_debugMutex);
+        g_lastRejected = closestRejected;
+    }
+
     if (!found) {
+        if (closestRejected.entityId >= 0) {
+            static std::uint64_t s_lastRejLogMs = 0;
+            if (nowMs - s_lastRejLogMs >= 1500) {
+                s_lastRejLogMs = nowMs;
+                VeoxDiag("[AimSkip] id=%d role='%s' why=%s px=%.0f rig=%d head=%d",
+                    closestRejected.entityId,
+                    closestRejected.role.empty() ? "?" : closestRejected.role.c_str(),
+                    closestRejected.reason, closestRejected.screenDist,
+                    closestRejected.rigValid ? 1 : 0, closestRejected.hasHead ? 1 : 0);
+            }
+        }
         dbg.reason = "no target in FOV";
         stopAiming();
         resetSmoothing();
@@ -2314,16 +2430,20 @@ void Tick()
         // re-checks BattleModel -> camera itself, but gating here stops the
         // 16 ms stream during the teardown/rebuild window entirely.
         const bool freshSnapshot =
-            snapshot->stampMs != 0 && now - snapshot->stampMs <= 500;
+            snapshot->stampMs != 0 && now >= snapshot->stampMs && now - snapshot->stampMs <= 400;
         const bool validRoots = cameraModel > 0x10000 &&
-            battleModel > 0x10000 && snapshot->localCharacter > 0x10000;
+            battleModel > 0x10000 && snapshot->battleEntities > 0x10000 &&
+            snapshot->localCharacter > 0x10000 && !snapshot->entities.empty();
+        const bool sessionSettled =
+            snapshot->sessionChangedMs == 0 ||
+            (now >= snapshot->sessionChangedMs && now - snapshot->sessionChangedMs >= 2000);
         if (!validRoots) {
             g_writeHealthy = false;
             g_lastVerdict = "waiting for session";
         } else if (!freshSnapshot) {
             g_writeHealthy = false;
             g_lastVerdict = "stale snapshot";
-        } else if (now < g_writeBlockedUntil) {
+        } else if (now < g_writeBlockedUntil || !sessionSettled) {
             g_writeHealthy = false;
             g_lastVerdict = "level transition";
         } else if (g_lastWriteTick == 0 || now - g_lastWriteTick >= kWriteIntervalMs) {
@@ -2596,6 +2716,29 @@ static void PushBudget()
     g_rcBudgets[g_rcBudgetCount++] = {b, b, std::chrono::steady_clock::now()};
 }
 
+static bool CanSafelyWriteSession(const RobRunReader::SnapshotPtr& snap, std::uint64_t now)
+{
+    if (!snap) return false;
+    if (snap->battleModel <= 0x10000 || snap->battleEntities <= 0x10000 ||
+        snap->localCharacter <= 0x10000 || snap->cameraModel <= 0x10000 ||
+        snap->entities.empty())
+        return false;
+    if (snap->stampMs == 0 || now < snap->stampMs || (now - snap->stampMs) > 400)
+        return false;
+    if (snap->sessionChangedMs != 0 &&
+        (now < snap->sessionChangedMs || (now - snap->sessionChangedMs) < 2000))
+        return false;
+    if (now < g_writeBlockedUntil)
+        return false;
+    return true;
+}
+
+static bool ReadPtrFreshSafe(std::uintptr_t addr, std::uintptr_t& out)
+{
+    out = 0;
+    return addr > 0x10000 && RobRunMemory::ReadBytesFresh(addr, &out, sizeof(out)) && out > 0x10000;
+}
+
 static void TickRecoil()
 {
     if (!ConfigInstance.Aim.NoRecoil) {
@@ -2604,7 +2747,12 @@ static void TickRecoil()
     }
 
     const auto snapshot = RobRunReader::GetSnapshot();
-    if (!snapshot || snapshot->battleModel <= 0x10000) return;
+    const std::uint64_t now = GetTickCount64();
+    if (!CanSafelyWriteSession(snapshot, now)) {
+        g_rcClient = 0;
+        g_rcPitchValid = false;
+        return;
+    }
 
     if (snapshot->sessionGeneration != g_rcSessionGen) {
         g_rcClient = 0;
@@ -2619,18 +2767,26 @@ static void TickRecoil()
         g_rcBurstWrites = 0;
     }
 
-    const std::uint64_t now = GetTickCount64();
-    if (g_rcClient <= 0x10000 || now - g_rcLastClientCheck > 500) {
+    if (g_rcClient <= 0x10000 || now - g_rcLastClientCheck > 250) {
         g_rcLastClientCheck = now;
-        const auto battleEnts = RobRunMemory::ReadPtr(
-            snapshot->battleModel + rr::BattleModel::BattleEntitiesModel);
-        if (battleEnts <= 0x10000) return;
-        const auto localPlayer = RobRunMemory::ReadPtr(
-            battleEnts + rr::BattleEntitiesModel::LocalPlayerEntityModel);
-        if (localPlayer <= 0x10000) return;
-        g_rcClient = RobRunMemory::ReadPtr(
-            localPlayer + rr::PlayerEntityModel::Client);
-        if (g_rcClient <= 0x10000) return;
+        std::uintptr_t liveBattleEnts = 0;
+        if (!ReadPtrFreshSafe(snapshot->battleModel + rr::BattleModel::BattleEntitiesModel, liveBattleEnts) ||
+            liveBattleEnts != snapshot->battleEntities) {
+            g_rcClient = 0;
+            g_rcPitchValid = false;
+            return;
+        }
+        std::uintptr_t localPlayer = 0;
+        if (!ReadPtrFreshSafe(liveBattleEnts + rr::BattleEntitiesModel::LocalPlayerEntityModel, localPlayer)) {
+            g_rcClient = 0;
+            return;
+        }
+        std::uintptr_t client = 0;
+        if (!ReadPtrFreshSafe(localPlayer + rr::PlayerEntityModel::Client, client)) {
+            g_rcClient = 0;
+            return;
+        }
+        g_rcClient = client;
     }
 
     const std::uintptr_t rotInput = snapshot->playerRotationInput;
@@ -2757,36 +2913,51 @@ void TickRecoilSpread()
         return;
 
     const auto snapshot = RobRunReader::GetSnapshot();
-    if (!snapshot || snapshot->battleModel <= 0x10000) return;
+    const std::uint64_t now = GetTickCount64();
+    if (!CanSafelyWriteSession(snapshot, now)) {
+        g_cachedPlayerClient = 0;
+        return;
+    }
 
     if (snapshot->sessionGeneration != g_lastRecoilGen) {
         g_cachedPlayerClient = 0;
         g_lastRecoilGen = snapshot->sessionGeneration;
     }
 
-    // Revalidate client pointer every 500ms (respawn can free old one)
+    // Always verify live BattleModel -> BattleEntitiesModel ownership via uncached
+    // DMA so a map transition can never write into a freed RecoilModel / FakeSpreadModel.
+    std::uintptr_t liveBattleEnts = 0;
+    if (!ReadPtrFreshSafe(snapshot->battleModel + rr::BattleModel::BattleEntitiesModel, liveBattleEnts) ||
+        liveBattleEnts != snapshot->battleEntities) {
+        g_cachedPlayerClient = 0;
+        return;
+    }
+
     static std::uint64_t g_lastClientCheck = 0;
-    const std::uint64_t now = GetTickCount64();
-    if (g_cachedPlayerClient <= 0x10000 || now - g_lastClientCheck > 500) {
+    if (g_cachedPlayerClient <= 0x10000 || now - g_lastClientCheck > 250) {
         g_lastClientCheck = now;
-        const std::uintptr_t battleEnts = RobRunMemory::ReadPtr(
-            snapshot->battleModel + rr::BattleModel::BattleEntitiesModel);
-        if (battleEnts <= 0x10000) return;
-        const std::uintptr_t localPlayer = RobRunMemory::ReadPtr(
-            battleEnts + rr::BattleEntitiesModel::LocalPlayerEntityModel);
-        if (localPlayer <= 0x10000) return;
-        g_cachedPlayerClient = RobRunMemory::ReadPtr(
-            localPlayer + rr::PlayerEntityModel::Client);
-        if (g_cachedPlayerClient <= 0x10000) return;
+        std::uintptr_t localPlayer = 0;
+        if (!ReadPtrFreshSafe(liveBattleEnts + rr::BattleEntitiesModel::LocalPlayerEntityModel, localPlayer)) {
+            g_cachedPlayerClient = 0;
+            return;
+        }
+        std::uintptr_t client = 0;
+        if (!ReadPtrFreshSafe(localPlayer + rr::PlayerEntityModel::Client, client)) {
+            g_cachedPlayerClient = 0;
+            return;
+        }
+        g_cachedPlayerClient = client;
     }
 
     // --- Dynamic Recoil: scale RecoilOffset (Vector2, 8 bytes) ---
     if (cfg.DynamicRecoilCompensation) {
-        const std::uintptr_t recoilModel = RobRunMemory::ReadPtr(
-            g_cachedPlayerClient + rr::PlayerClient::Recoil);
-        if (recoilModel > 0x10000) {
+        std::uintptr_t recoilModel = 0;
+        if (ReadPtrFreshSafe(g_cachedPlayerClient + rr::PlayerClient::Recoil, recoilModel)) {
             struct { float x, y; } cur{};
-            if (RobRunMemory::ReadBytes(recoilModel + rr::RecoilModel::OffsetVec, &cur, sizeof(cur))) {
+            if (RobRunMemory::ReadBytesFresh(recoilModel + rr::RecoilModel::OffsetVec, &cur, sizeof(cur)) &&
+                std::isfinite(cur.x) && std::isfinite(cur.y) &&
+                std::fabs(cur.x) < 100.f && std::fabs(cur.y) < 100.f &&
+                (std::fabs(cur.x) > 1e-4f || std::fabs(cur.y) > 1e-4f)) {
                 const float factor = std::clamp(1.f - cfg.RecoilStrength, 0.f, 1.f);
                 cur.x *= factor;
                 cur.y *= factor;
@@ -2798,20 +2969,26 @@ void TickRecoilSpread()
 
     // --- No Spread: zero per-frame outputs (limited effectiveness) ---
     if (cfg.NoSpread) {
-        Memory::ScopedScatter scatter(TargetProcess);
-        if (scatter.handle) {
-            const std::uintptr_t spreadModel = RobRunMemory::ReadPtr(
-                g_cachedPlayerClient + rr::PlayerClient::FakeSpread);
-            if (spreadModel > 0x10000) {
-                float zero = 0.f;
-                TargetProcess.AddScatterWriteRequest(scatter,
-                    spreadModel + rr::FakeSpreadModel::Spread, &zero, sizeof(zero));
-                TargetProcess.AddScatterWriteRequest(scatter,
-                    spreadModel + rr::FakeSpreadModel::Air, &zero, sizeof(zero));
-                TargetProcess.AddScatterWriteRequest(scatter,
-                    spreadModel + rr::FakeSpreadModel::Move, &zero, sizeof(zero));
+        std::uintptr_t spreadModel = 0;
+        if (ReadPtrFreshSafe(g_cachedPlayerClient + rr::PlayerClient::FakeSpread, spreadModel)) {
+            float curSpread = 0.f, curAir = 0.f, curMove = 0.f;
+            if (RobRunMemory::ReadBytesFresh(spreadModel + rr::FakeSpreadModel::Spread, &curSpread, sizeof(curSpread)) &&
+                RobRunMemory::ReadBytesFresh(spreadModel + rr::FakeSpreadModel::Air, &curAir, sizeof(curAir)) &&
+                RobRunMemory::ReadBytesFresh(spreadModel + rr::FakeSpreadModel::Move, &curMove, sizeof(curMove)) &&
+                std::isfinite(curSpread) && std::isfinite(curAir) && std::isfinite(curMove) &&
+                (std::fabs(curSpread) > 1e-4f || std::fabs(curAir) > 1e-4f || std::fabs(curMove) > 1e-4f)) {
+                Memory::ScopedScatter scatter(TargetProcess);
+                if (scatter.handle) {
+                    float zero = 0.f;
+                    TargetProcess.AddScatterWriteRequest(scatter,
+                        spreadModel + rr::FakeSpreadModel::Spread, &zero, sizeof(zero));
+                    TargetProcess.AddScatterWriteRequest(scatter,
+                        spreadModel + rr::FakeSpreadModel::Air, &zero, sizeof(zero));
+                    TargetProcess.AddScatterWriteRequest(scatter,
+                        spreadModel + rr::FakeSpreadModel::Move, &zero, sizeof(zero));
+                    TargetProcess.ExecuteScatterWrite(scatter);
+                }
             }
-            TargetProcess.ExecuteScatterWrite(scatter);
         }
     }
 }
@@ -2861,7 +3038,7 @@ void DrawDebug()
     const char* profName = (d.activeWeaponClass >= 0 && d.activeWeaponClass < kWeaponClassCount)
         ? kWeaponClassNames[d.activeWeaponClass] : "Default";
 
-    char lines[10][160];
+    char lines[11][160];
     std::snprintf(lines[0], sizeof(lines[0]), "Aim: %s  Curve: %s  FOV: %d deg",
         d.enabled ? "on" : "off", curveName, d.activeFov);
     std::snprintf(lines[1], sizeof(lines[1]), "Menu: %s  Key: %s (%s)",
@@ -2902,9 +3079,24 @@ void DrawDebug()
                 cam.nativeEnabled ? "not found" : "off", pose);
     }
 
+    {
+        RejectedDebug rej{};
+        {
+            std::lock_guard<std::mutex> lk(g_debugMutex);
+            rej = g_lastRejected;
+        }
+        if (rej.entityId >= 0)
+            std::snprintf(lines[10], sizeof(lines[10]),
+                "Skip: id=%d [%s] why=%s px=%.0f rig=%d head=%d",
+                rej.entityId, rej.role.empty() ? "?" : rej.role.c_str(),
+                rej.reason, rej.screenDist, rej.rigValid ? 1 : 0, rej.hasHead ? 1 : 0);
+        else
+            std::snprintf(lines[10], sizeof(lines[10]), "Skip: none");
+    }
+
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     const ImVec2 origin(12.f, 12.f);
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 11; ++i) {
         dl->AddText(ImVec2(origin.x + 1.f, origin.y + i * 15.f + 1.f),
             IM_COL32(36, 38, 44, 220), lines[i]);
         dl->AddText(ImVec2(origin.x, origin.y + i * 15.f),
