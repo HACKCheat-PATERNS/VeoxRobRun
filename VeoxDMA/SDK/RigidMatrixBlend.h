@@ -3,9 +3,6 @@
 #include <cmath>
 #include "Matrix4x4.h"
 
-// Pose matrices are column-major (matrix[col][row]). Interpolating their 3x3
-// rotation components independently does not preserve orthogonality and can
-// shear/skew skinned limbs. Nlerp the corresponding unit quaternions instead.
 namespace RigidMatrixBlend {
 
 struct Quat {
@@ -93,4 +90,4 @@ inline Matrix4x4 Blend(const Matrix4x4& previous,
     return out;
 }
 
-} // namespace RigidMatrixBlend
+}
