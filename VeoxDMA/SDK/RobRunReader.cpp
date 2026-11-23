@@ -4236,6 +4236,70 @@ static void UpdateInternal()
             const bool stableArray = readPointer(customization, 0x20) == lodArray;
             DebugLog::Log("RigSkinDiagEnd event=%s id=%d stableArray=%d stableCount=%d",
                 event, id, static_cast<int>(stableArray), static_cast<int>(stableCount));
+            // Compare an independently resolved renderer bone list against
+            // the production layout. This shadow path never publishes to the
+            // ESP, aim or Chams components.
+            Skeleton::SkinParallelSample alternative;
+            const bool altSampled = Skeleton::SampleSkinParallel(view, DmaReadFresh, alternative);
+            static const char* const kParallelStatus[] = {
+                "view_unavailable", "renderer_unavailable", "native_bones_unresolved",
+                "bindings_found", "pose_unavailable", "sampled", "snapshot_changed"
+            };
+            const unsigned statusCode = static_cast<unsigned>(alternative.status);
+            const char* statusName = statusCode < sizeof(kParallelStatus) / sizeof(kParallelStatus[0])
+                ? kParallelStatus[statusCode] : "unknown";
+            DebugLog::Log("RigSkinParallel event=%s id=%d status=%s lod=%d renderer=%llx nativeArrayOffset=%d stride=%d rendererBones=%u inHierarchy=%u hierarchyCount=%u posePoints=%zu hierarchy=%llx matrices=%llx primaryCount=%d primarySegments=%zu primaryMissing=%03X",
+                event, id, statusName, alternative.lodIndex,
+                static_cast<unsigned long long>(alternative.renderer),
+                alternative.nativeArrayOffset, alternative.nativeStride,
+                alternative.rendererBoneCount, alternative.bonesInHierarchy,
+                alternative.hierarchyCount, alternative.worldPoints.size(),
+                static_cast<unsigned long long>(alternative.hierarchy),
+                static_cast<unsigned long long>(alternative.matrices),
+                layout.count, layout.segments.size(),
+                static_cast<unsigned int>(RigMissingLimbMask(layout)));
+
+            bool productionSampled = false;
+            std::vector<float> differences;
+            if (altSampled && alternative.hierarchy == layout.hierarchy &&
+                alternative.matrices == layout.matrices &&
+                static_cast<int>(alternative.hierarchyCount) == layout.count &&
+                Skeleton::ValidateHierarchy(layout, DmaReadFresh)) {
+                std::vector<Matrix4x4> primaryMatrices(
+                    static_cast<std::size_t>(layout.count));
+                std::vector<Skeleton::BoneSegment> primarySegments;
+                productionSampled = Skeleton::SampleLayout(
+                    layout, DmaReadFresh, primarySegments, nullptr,
+                    nullptr, primaryMatrices.data());
+                std::int32_t afterCount = -1;
+                if (!DmaReadFresh(layout.hierarchy + 0x38, &afterCount,
+                                  sizeof(afterCount)) || afterCount != layout.count)
+                    productionSampled = false;
+                if (productionSampled) {
+                    for (const auto& point : alternative.worldPoints) {
+                        const auto idx = static_cast<std::size_t>(point.first);
+                        if (idx >= primaryMatrices.size()) continue;
+                        const auto& m = primaryMatrices[idx];
+                        if (m.matrix[3][3] < 0.9f) continue;
+                        const float dx = m.matrix[3][0] - point.second.x;
+                        const float dy = m.matrix[3][1] - point.second.y;
+                        const float dz = m.matrix[3][2] - point.second.z;
+                        const float delta = std::sqrt(dx*dx + dy*dy + dz*dz);
+                        if (std::isfinite(delta)) differences.push_back(delta);
+                    }
+                }
+            }
+            std::sort(differences.begin(), differences.end());
+            const float maxDelta = differences.empty() ? -1.f : differences.back();
+            const float p95Delta = differences.empty() ? -1.f :
+                differences[static_cast<std::size_t>(
+                    (differences.size() - 1) * 95 / 100)];
+            DebugLog::Log("RigSkinCompare event=%s id=%d productionSampled=%d parallelSampled=%d comparable=%zu maxPosDelta=%.5f p95PosDelta=%.5f sameHierarchy=%d",
+                event, id, static_cast<int>(productionSampled), static_cast<int>(altSampled),
+                differences.size(), maxDelta, p95Delta,
+                static_cast<int>(alternative.hierarchy != 0 &&
+                                 alternative.hierarchy == layout.hierarchy));
+
         };
         std::vector<std::size_t> lateResolve;
         int rebuildBudget = fullMapFastMode ? 0 : 1;
