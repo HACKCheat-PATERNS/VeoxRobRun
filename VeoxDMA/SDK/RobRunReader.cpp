@@ -4177,6 +4177,10 @@ static void UpdateInternal()
                 static_cast<int>(parentsOk), static_cast<unsigned long long>(liveParents),
                 static_cast<int>(transformsOk), static_cast<unsigned long long>(liveTransforms),
                 layout.segments.size(), static_cast<unsigned int>(RigMissingLimbMask(layout)));
+            // Diagnostic-only alternate route from the current dump.cs.
+            // This proves whether the managed SkinnedMeshRenderer references stay
+            // available when the native TransformHierarchy count collapses.
+            // It does NOT provide native bones/rootBone offsets or change pose reads.
             constexpr std::uint64_t maxAddress = 0x00007FFFFFFFFFFFULL;
             auto safeAddress = [](std::uint64_t address) {
                 return address > 0x10000 && address < 0x00007FFFFFFFFFFFULL;
@@ -4188,63 +4192,50 @@ static void UpdateInternal()
                     return 0;
                 return value;
             };
-            auto readInt = [&](std::uint64_t base, std::uint64_t offset,
-                               std::int32_t& value) -> bool {
-                value = -1;
-                return safeAddress(base) && base <= maxAddress - offset &&
-                    DmaReadFresh(base + offset, &value, sizeof(value));
-            };
-            const std::uint64_t skeleton = readPointer(characterModel, 0x138);
-            const std::uint64_t description = readPointer(skeleton, 0x10);
-            const std::uint64_t bonesData = readPointer(skeleton, 0x18);
-            const std::uint64_t hierarchyData = readPointer(description, 0x28);
-            std::int32_t configCount = -1, dataSize = -1, rootIndex = -1;
-            const bool configCountOk = readInt(description, 0x10, configCount);
-            const bool dataSizeOk = readInt(description, 0x14, dataSize);
-            const bool rootIndexOk = readInt(description, 0x34, rootIndex);
-            DebugLog::Log("RigAltSource event=%s id=%d character=%llx skeleton=%llx description=%llx bonesData=%llx hierarchyData=%llx bonesCount=%d/%d plausible=%d dataSize=%d/%d rootIndex=%d/%d",
+            const std::uint64_t customization = readPointer(view, 0xB8);
+            const bool customizationClass = customization != 0 &&
+                RobRunMemory::IsClass(static_cast<std::uintptr_t>(customization), "CharacterCustomizationView");
+            const std::uint64_t lodArray = customizationClass
+                ? readPointer(customization, 0x20) : 0;
+            std::uint64_t lodCount = 0;
+            const bool countOk = lodArray != 0 &&
+                lodArray <= maxAddress - 0x18 &&
+                DmaReadFresh(lodArray + 0x18, &lodCount, sizeof(lodCount));
+            const bool plausibleCount = countOk && lodCount > 0 && lodCount <= 8;
+            DebugLog::Log("RigSkinDiag event=%s id=%d view=%llx customization=%llx classOk=%d lodArray=%llx lodCount=%d/%llu plausible=%d",
                 event, id,
-                static_cast<unsigned long long>(characterModel),
-                static_cast<unsigned long long>(skeleton),
-                static_cast<unsigned long long>(description),
-                static_cast<unsigned long long>(bonesData),
-                static_cast<unsigned long long>(hierarchyData),
-                static_cast<int>(configCountOk), configCount,
-                static_cast<int>(configCountOk && configCount >= 2 && configCount <= 2048),
-                static_cast<int>(dataSizeOk), dataSize,
-                static_cast<int>(rootIndexOk), rootIndex);
-            if (std::strcmp(event, "built-full") == 0)
+                static_cast<unsigned long long>(view),
+                static_cast<unsigned long long>(customization),
+                static_cast<int>(customizationClass),
+                static_cast<unsigned long long>(lodArray),
+                static_cast<int>(countOk), static_cast<unsigned long long>(lodCount),
+                static_cast<int>(plausibleCount));
+            if (!plausibleCount)
                 return;
-
-            const std::uint64_t movement = readPointer(view, 0x20);
-            const std::uint64_t animation = readPointer(view, 0x28);
-            const std::uint64_t torso = readPointer(animation, 0x30);
-            const std::uint64_t head = readPointer(animation, 0x28);
-            struct AlternativeRoute {
-                const char* name;
-                std::uint64_t managed;
-            };
-            const AlternativeRoute routes[] = {
-                {"movement", readPointer(movement, 0x20)},
-                {"animation-torso", readPointer(torso, 0x20)},
-                {"animation-head", readPointer(head, 0x20)}
-            };
-            for (const auto& route : routes) {
-                const std::uint64_t native = readPointer(route.managed, 0x10);
-                const std::uint64_t altHierarchy = readPointer(native, 0x28);
-                const std::uint64_t altMatrices = readPointer(altHierarchy, 0x18);
-                std::int32_t altCount = -1;
-                const bool countOk = readInt(altHierarchy, 0x38, altCount);
-                DebugLog::Log("RigAltRoute event=%s id=%d route=%s managed=%llx native=%llx hierarchy=%llx matrices=%llx count38=%d/%d plausible=%d sameHierarchy=%d",
-                    event, id, route.name,
-                    static_cast<unsigned long long>(route.managed),
-                    static_cast<unsigned long long>(native),
-                    static_cast<unsigned long long>(altHierarchy),
-                    static_cast<unsigned long long>(altMatrices),
-                    static_cast<int>(countOk), altCount,
-                    static_cast<int>(countOk && altCount >= 2 && altCount <= 2048),
-                    static_cast<int>(altHierarchy != 0 && altHierarchy == layout.hierarchy));
+            for (std::uint64_t i = 0; i < lodCount; ++i) {
+                const std::uint64_t lod = readPointer(lodArray, 0x20 + i * sizeof(std::uint64_t));
+                const std::uint64_t body = readPointer(lod, 0x38);
+                const std::uint64_t head = readPointer(lod, 0x80);
+                const bool bodyClass = body != 0 &&
+                    RobRunMemory::IsClass(static_cast<std::uintptr_t>(body), "SkinnedMeshRenderer");
+                const bool headClass = head != 0 &&
+                    RobRunMemory::IsClass(static_cast<std::uintptr_t>(head), "SkinnedMeshRenderer");
+                const std::uint64_t bodyNative = bodyClass ? readPointer(body, 0x10) : 0;
+                const std::uint64_t headNative = headClass ? readPointer(head, 0x10) : 0;
+                DebugLog::Log("RigSkinLod event=%s id=%d lod=%llu lodObject=%llx body=%llx bodyClass=%d bodyNative=%llx head=%llx headClass=%d headNative=%llx",
+                    event, id, static_cast<unsigned long long>(i),
+                    static_cast<unsigned long long>(lod),
+                    static_cast<unsigned long long>(body), static_cast<int>(bodyClass),
+                    static_cast<unsigned long long>(bodyNative),
+                    static_cast<unsigned long long>(head), static_cast<int>(headClass),
+                    static_cast<unsigned long long>(headNative));
             }
+            std::uint64_t postCount = 0;
+            const bool stableCount = DmaReadFresh(lodArray + 0x18, &postCount, sizeof(postCount)) &&
+                postCount == lodCount;
+            const bool stableArray = readPointer(customization, 0x20) == lodArray;
+            DebugLog::Log("RigSkinDiagEnd event=%s id=%d stableArray=%d stableCount=%d",
+                event, id, static_cast<int>(stableArray), static_cast<int>(stableCount));
         };
         std::vector<std::size_t> lateResolve;
         int rebuildBudget = fullMapFastMode ? 0 : 1;
