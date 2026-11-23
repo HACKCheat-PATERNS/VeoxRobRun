@@ -10,6 +10,7 @@ extern void RequestReattach();
 #include "ConfigInstance.h"
 #include "RigidMatrixBlend.h"
 #include "PoseFrameSelector.h"
+#include "RigRecoveryPolicy.h"
 #include "DebugLog.h"
 #include "Overlay.h"
 #include <atomic>
@@ -4195,12 +4196,10 @@ static void UpdateInternal()
                 return ok;
             };
 
-            const bool incomplete = rig.layoutValid && layoutMissingLimbs(rig.layout) &&
-                rig.upgradeAttempts < 4;
-            const std::uint64_t upgradeIntervalMs =
-                (rig.upgradeAttempts == 0) ? 500 :
-                (rig.upgradeAttempts == 1) ? 1500 : 4000;
-            const std::uint64_t checkIntervalMs = incomplete ? upgradeIntervalMs : 1500;
+            const bool incomplete = rig.layoutValid && layoutMissingLimbs(rig.layout);
+            const std::uint64_t checkIntervalMs = incomplete
+                ? RigRecoveryPolicy::RetryIntervalMs(rig.upgradeAttempts)
+                : 1500;
             if (rig.layoutValid && now - rig.layoutStamp >= checkIntervalMs) {
                 if (viewPtr <= 0x10000 ||
                     !Skeleton::ValidateHierarchy(rig.layout, DmaRead)) {
@@ -4212,7 +4211,7 @@ static void UpdateInternal()
                     rig.layoutStamp = now;
                     --rebuildBudget;
                     ++passRebuilds;
-                    ++rig.upgradeAttempts;
+                    rig.upgradeAttempts = RigRecoveryPolicy::IncrementAttempt(rig.upgradeAttempts);
                     // Silently try upgrading an incomplete layout using cached
                     // DMA (bone name lookup inside uses 3 fast scatter calls).
                     Skeleton::RigLayout candidate;
