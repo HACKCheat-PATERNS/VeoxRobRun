@@ -93,46 +93,6 @@ static inline bool IsValidBoneSegment(const Vector3& a, const Vector3& b, const 
 	return len >= 0.02f && len <= 1.25f;
 }
 
-static bool DrawCapsuleSegment(ImDrawList* dl, const Matrix4x4& vp, int screenW, int screenH,
-	const Vector3& a, float radiusA, const Vector3& b, float radiusB,
-	const Vector3& root, ImU32 fillCol, bool outline, ImU32 outlineCol, float outlineThick,
-	bool capA, bool capB, float maxBoneDist)
-{
-	if (!IsValidBoneSegment(a, b, root, maxBoneDist))
-		return false;
-
-	ImVec2 sa{}, sb{};
-	float ra = 0.f, rb = 0.f;
-	if (!ProjectWithRadius(vp, a, radiusA, screenW, screenH, sa, ra)) return false;
-	if (!ProjectWithRadius(vp, b, radiusB, screenW, screenH, sb, rb)) return false;
-
-	// Sanity limit: screen distance between two bone joints cannot exceed screen height
-	const float dx = sb.x - sa.x;
-	const float dy = sb.y - sa.y;
-	const float distSq = dx * dx + dy * dy;
-	const float maxDist = (float)screenH * 0.85f;
-	if (distSq > maxDist * maxDist)
-		return false;
-
-	Esp::DrawCapsule2D(dl, sa, ra, sb, rb, fillCol, outline, outlineCol, outlineThick, capA, capB);
-	return true;
-}
-
-static bool DrawSpherePoint(ImDrawList* dl, const Matrix4x4& vp, int screenW, int screenH,
-	const Vector3& p, float radius, const Vector3& root,
-	ImU32 fillCol, bool outline, ImU32 outlineCol, float outlineThick, float maxBoneDist)
-{
-	if (!IsValidBone(p, root, maxBoneDist))
-		return false;
-
-	ImVec2 sp{};
-	float r = 0.f;
-	if (!ProjectWithRadius(vp, p, radius, screenW, screenH, sp, r)) return false;
-
-	Esp::DrawSphere2D(dl, sp, r, fillCol, outline, outlineCol, outlineThick);
-	return true;
-}
-
 static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 	const Matrix4x4& vp, int screenW, int screenH, const PlayerConfig& pcfg)
 {
@@ -155,11 +115,6 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 			? Esp::ShadeColour(pcfg.ChamsVisibleColour, pcfg.ChamsAlpha)
 			: Esp::ShadeColour(pcfg.ChamsHiddenColour, pcfg.ChamsAlpha);
 	}
-
-	const bool outline = pcfg.ChamsOutline;
-	const ImU32 outlineCol = Esp::ShadeColour(pcfg.ChamsOutlineColour, std::min(1.0f, pcfg.ChamsAlpha * 1.5f));
-	const float outlineThick = 1.0f;
-	const float scale = std::clamp(pcfg.ChamsScale, 0.4f, 2.5f);
 
 	// Mesh-based chams: skin the character mesh and draw filled triangles
 	if (!g_charMeshLoadAttempted) {
@@ -204,9 +159,8 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 		CharacterMesh::Skin(g_charMesh, ent.boneWorldMatrices.data(),
 			safeBoneCount, activeBoneMap, skinned.data());
 
-		// Reject incomplete meshes before drawing any triangles. The old Draw()
-		// returned true after just one triangle and hid the capsule fallback,
-		// leaving floating heads, missing legs or isolated arms on screen.
+		// Render only a sufficiently complete skinned mesh. Incomplete poses
+		// must not become detached heads, isolated limbs or partial capsules.
 		const auto coverage = CharacterMesh::MeasureCoverage(g_charMesh, skinned.data());
 		if (coverage.CompleteEnough()) {
 			if (CharacterMesh::Draw(dl, g_charMesh, skinned.data(), vp,
@@ -216,7 +170,7 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 			static ULONGLONG lastCoverageLog = 0;
 			const ULONGLONG now = GetTickCount64();
 			if (now - lastCoverageLog >= 2000) {
-				DLOG("PlayerEsp: partial mesh rejected: %zu/%zu triangles; bands %zu/%zu %zu/%zu %zu/%zu (fallback to capsules)",
+				DLOG("PlayerEsp: partial mesh rejected: %zu/%zu triangles; bands %zu/%zu %zu/%zu %zu/%zu (mesh Chams skipped)",
 					coverage.valid, coverage.total,
 					coverage.validByHeight[0], coverage.totalByHeight[0],
 					coverage.validByHeight[1], coverage.totalByHeight[1],
@@ -225,213 +179,7 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 			}
 		}
 	}
-
-	const auto& bp = ent.bonePoints;
-	const float maxBoneDist = ent.inVehicle ? 12.0f : 3.0f;
-
-	const bool haveHead = bp.hasHead && IsValidBone(bp.head, root, maxBoneDist);
-	const bool haveNeck = bp.hasNeck && IsValidBone(bp.neck, root, maxBoneDist);
-	const bool haveChest = bp.hasChest && IsValidBone(bp.chest, root, maxBoneDist);
-	const bool havePelvis = bp.hasPelvis && IsValidBone(bp.pelvis, root, maxBoneDist);
-
-	const bool haveLS = IsValidBone(bp.leftShoulder, root, maxBoneDist);
-	const bool haveRS = IsValidBone(bp.rightShoulder, root, maxBoneDist);
-	const bool haveLE = IsValidBone(bp.leftElbow, root, maxBoneDist);
-	const bool haveRE = IsValidBone(bp.rightElbow, root, maxBoneDist);
-	const bool haveLH = IsValidBone(bp.leftHand, root, maxBoneDist);
-	const bool haveRH = IsValidBone(bp.rightHand, root, maxBoneDist);
-
-	const bool haveLHip = IsValidBone(bp.leftHip, root, maxBoneDist);
-	const bool haveRHip = IsValidBone(bp.rightHip, root, maxBoneDist);
-	const bool haveLKnee = IsValidBone(bp.leftKnee, root, maxBoneDist);
-	const bool haveRKnee = IsValidBone(bp.rightKnee, root, maxBoneDist);
-	const bool haveLFoot = IsValidBone(bp.leftFoot, root, maxBoneDist);
-	const bool haveRFoot = IsValidBone(bp.rightFoot, root, maxBoneDist);
-
-	bool drawnAny = false;
-
-	// ---- PASS 1: FILL everything (no outlines) ----
-	// Draw all fills first so overlapping capsules create a solid body.
-
-	// 1a. Torso capsules (always drawn — provides fill even when quad is used)
-	if (haveNeck && haveChest)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.neck, 0.14f * scale,
-			bp.chest, 0.24f * scale, root, chamsCol, false, 0, 0, false, false, maxBoneDist) || drawnAny;
-	}
-	if (haveChest && havePelvis)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.chest, 0.24f * scale,
-			bp.pelvis, 0.20f * scale, root, chamsCol, false, 0, 0, false, true, maxBoneDist) || drawnAny;
-	}
-	if (haveLS && haveRS)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftShoulder, 0.14f * scale,
-			bp.rightShoulder, 0.14f * scale, root, chamsCol, false, 0, 0, false, false, maxBoneDist) || drawnAny;
-	}
-	if (haveLHip && haveRHip)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftHip, 0.14f * scale,
-			bp.rightHip, 0.14f * scale, root, chamsCol, false, 0, 0, false, false, maxBoneDist) || drawnAny;
-	}
-
-	// 1b. Torso quad overlay (extra fill, wider coverage at any angle)
-	bool torsoQuadOk = false;
-	ImVec2 sLS{}, sRS{}, sRHip{}, sLHip{};
-	if (haveLS && haveRS && haveLHip && haveRHip)
-	{
-		float rLS = 0.f, rRS = 0.f, rRHip = 0.f, rLHip = 0.f;
-		if (ProjectWithRadius(vp, bp.leftShoulder, 0.18f * scale, screenW, screenH, sLS, rLS) &&
-			ProjectWithRadius(vp, bp.rightShoulder, 0.18f * scale, screenW, screenH, sRS, rRS) &&
-			ProjectWithRadius(vp, bp.rightHip, 0.16f * scale, screenW, screenH, sRHip, rRHip) &&
-			ProjectWithRadius(vp, bp.leftHip, 0.16f * scale, screenW, screenH, sLHip, rLHip))
-		{
-			const ImVec2 pts[4] = { sLS, sRS, sRHip, sLHip };
-			bool isConvex = true;
-			float sign = 0.f;
-			for (int i = 0; i < 4; ++i) {
-				const ImVec2& p0 = pts[i];
-				const ImVec2& p1 = pts[(i + 1) % 4];
-				const ImVec2& p2 = pts[(i + 2) % 4];
-				const float cp = (p1.x - p0.x) * (p2.y - p1.y) - (p1.y - p0.y) * (p2.x - p1.x);
-				if (std::abs(cp) < 1.0f) { isConvex = false; break; }
-				if (sign == 0.f) sign = (cp > 0.f) ? 1.f : -1.f;
-				else if ((cp > 0.f && sign < 0.f) || (cp < 0.f && sign > 0.f)) { isConvex = false; break; }
-			}
-			if (isConvex) {
-				dl->AddQuadFilled(sLS, sRS, sRHip, sLHip, chamsCol);
-				torsoQuadOk = true;
-				drawnAny = true;
-			}
-		}
-	}
-
-	// 2a. Head fill
-	if (haveHead)
-	{
-		drawnAny = DrawSpherePoint(dl, vp, screenW, screenH, bp.head, 0.14f * scale, root,
-			chamsCol, false, 0, 0, maxBoneDist) || drawnAny;
-	}
-	if (haveHead && haveNeck)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.head, 0.12f * scale,
-			bp.neck, 0.12f * scale, root, chamsCol, false, 0, 0, false, false, maxBoneDist) || drawnAny;
-	}
-	else if (haveHead && haveChest)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.head, 0.12f * scale,
-			bp.chest, 0.16f * scale, root, chamsCol, false, 0, 0, false, false, maxBoneDist) || drawnAny;
-	}
-
-	// 3a. Arm fills
-	if (haveLS && haveLE)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftShoulder, 0.12f * scale,
-			bp.leftElbow, 0.10f * scale, root, chamsCol, false, 0, 0, true, false, maxBoneDist) || drawnAny;
-	}
-	if (haveLE && haveLH)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftElbow, 0.10f * scale,
-			bp.leftHand, 0.08f * scale, root, chamsCol, false, 0, 0, false, true, maxBoneDist) || drawnAny;
-	}
-	if (haveRS && haveRE)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.rightShoulder, 0.12f * scale,
-			bp.rightElbow, 0.10f * scale, root, chamsCol, false, 0, 0, true, false, maxBoneDist) || drawnAny;
-	}
-	if (haveRE && haveRH)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.rightElbow, 0.10f * scale,
-			bp.rightHand, 0.08f * scale, root, chamsCol, false, 0, 0, false, true, maxBoneDist) || drawnAny;
-	}
-
-	// 4a. Leg fills
-	if (haveLHip && haveLKnee)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftHip, 0.15f * scale,
-			bp.leftKnee, 0.12f * scale, root, chamsCol, false, 0, 0, true, false, maxBoneDist) || drawnAny;
-	}
-	if (haveLKnee && haveLFoot)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftKnee, 0.12f * scale,
-			bp.leftFoot, 0.09f * scale, root, chamsCol, false, 0, 0, false, true, maxBoneDist) || drawnAny;
-	}
-	if (haveRHip && haveRKnee)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.rightHip, 0.15f * scale,
-			bp.rightKnee, 0.12f * scale, root, chamsCol, false, 0, 0, true, false, maxBoneDist) || drawnAny;
-	}
-	if (haveRKnee && haveRFoot)
-	{
-		drawnAny = DrawCapsuleSegment(dl, vp, screenW, screenH, bp.rightKnee, 0.12f * scale,
-			bp.rightFoot, 0.09f * scale, root, chamsCol, false, 0, 0, false, true, maxBoneDist) || drawnAny;
-	}
-
-	// ---- PASS 2: OUTLINE only (on top of all fills) ----
-	if (outline && (outlineCol & IM_COL32_A_MASK) != 0)
-	{
-		const ImU32 noFill = IM_COL32(0, 0, 0, 0);
-
-		// Torso quad outline
-		if (torsoQuadOk) {
-			dl->AddLine(sLS, sRS, outlineCol, outlineThick);
-			dl->AddLine(sRS, sRHip, outlineCol, outlineThick);
-			dl->AddLine(sRHip, sLHip, outlineCol, outlineThick);
-			dl->AddLine(sLHip, sLS, outlineCol, outlineThick);
-		}
-
-		// Head outline
-		if (haveHead)
-			DrawSpherePoint(dl, vp, screenW, screenH, bp.head, 0.14f * scale, root,
-				noFill, true, outlineCol, outlineThick, maxBoneDist);
-
-		// Arm outlines (outer contour only — cap at shoulder and hand)
-		if (haveLS && haveLE)
-			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftShoulder, 0.12f * scale,
-				bp.leftElbow, 0.10f * scale, root, noFill, true, outlineCol, outlineThick, true, false, maxBoneDist);
-		if (haveLE && haveLH)
-			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftElbow, 0.10f * scale,
-				bp.leftHand, 0.08f * scale, root, noFill, true, outlineCol, outlineThick, false, true, maxBoneDist);
-		if (haveRS && haveRE)
-			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.rightShoulder, 0.12f * scale,
-				bp.rightElbow, 0.10f * scale, root, noFill, true, outlineCol, outlineThick, true, false, maxBoneDist);
-		if (haveRE && haveRH)
-			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.rightElbow, 0.10f * scale,
-				bp.rightHand, 0.08f * scale, root, noFill, true, outlineCol, outlineThick, false, true, maxBoneDist);
-
-		// Leg outlines (cap at hip and foot)
-		if (haveLHip && haveLKnee)
-			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftHip, 0.15f * scale,
-				bp.leftKnee, 0.12f * scale, root, noFill, true, outlineCol, outlineThick, true, false, maxBoneDist);
-		if (haveLKnee && haveLFoot)
-			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.leftKnee, 0.12f * scale,
-				bp.leftFoot, 0.09f * scale, root, noFill, true, outlineCol, outlineThick, false, true, maxBoneDist);
-		if (haveRHip && haveRKnee)
-			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.rightHip, 0.15f * scale,
-				bp.rightKnee, 0.12f * scale, root, noFill, true, outlineCol, outlineThick, true, false, maxBoneDist);
-		if (haveRKnee && haveRFoot)
-			DrawCapsuleSegment(dl, vp, screenW, screenH, bp.rightKnee, 0.12f * scale,
-				bp.rightFoot, 0.09f * scale, root, noFill, true, outlineCol, outlineThick, false, true, maxBoneDist);
-	}
-
-	// 5. Fallback: if named bone points didn't resolve, render validated ent.bones
-	if (!drawnAny)
-	{
-		for (const auto& seg : ent.bones)
-		{
-			if (!IsValidBoneSegment(seg.a, seg.b, root, maxBoneDist))
-				continue;
-
-			ImU32 segChamsCol = chamsCol;
-			if (pcfg.ChamsVisCheck) {
-				segChamsCol = seg.visible
-					? Esp::ShadeColour(pcfg.ChamsVisibleColour, pcfg.ChamsAlpha)
-					: Esp::ShadeColour(pcfg.ChamsHiddenColour, pcfg.ChamsAlpha);
-			}
-			DrawCapsuleSegment(dl, vp, screenW, screenH, seg.a, 0.12f * scale,
-				seg.b, 0.12f * scale, root, segChamsCol, outline, outlineCol, outlineThick, true, true, maxBoneDist);
-		}
-	}
+	// No geometric fallback: skip Chams for entities without a usable mesh.
 }
 
 static void DrawOffscreenArrow(ImDrawList* dl, int screenW, int screenH,
