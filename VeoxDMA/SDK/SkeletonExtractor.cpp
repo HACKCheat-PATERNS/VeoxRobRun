@@ -1851,7 +1851,7 @@ bool SampleSkinParallel(U view, const Read& read, SkinParallelSample& out)
         auto tryBinding = [&](U data, std::uint32_t count, int stride,
                               int slot, int field) -> bool {
             if (!targetOk || !validPtr(data) || count < 16 || count > 512 ||
-                inspected >= 20 || data > kMaxAddress - count * stride)
+                inspected >= 8 || data > kMaxAddress - count * stride)
                 return false;
             ++inspected;
             const std::uint32_t sample[3] = {0u, count / 2, count - 1};
@@ -2019,7 +2019,7 @@ bool SampleSkinParallel(U view, const Read& read, SkinParallelSample& out)
         if (out.worldPoints.size() >= 48) break;
         const auto& w = world[static_cast<std::size_t>(index)];
         Vec position{w.matrix[3][0], w.matrix[3][1], w.matrix[3][2]};
-        if (Finite(position))
+        if (w.matrix[3][3] > 0.9f && Finite(position))
             out.worldPoints.push_back({index, position});
     }
     out.status = out.worldPoints.empty()
