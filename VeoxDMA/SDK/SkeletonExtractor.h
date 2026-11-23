@@ -44,7 +44,6 @@ struct RigProbe {
     std::uint8_t source = 0;
     bool read38 = false;
     bool read10 = false;
-    bool usedFallback = false;
 };
 
 // Everything about a rig that stays constant while the character exists:
