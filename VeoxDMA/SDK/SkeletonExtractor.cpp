@@ -113,6 +113,7 @@ struct ResolvedHierarchy {
     std::vector<std::int32_t> parent;
     std::vector<U> transforms;
     std::vector<unsigned char> reachable;
+    RigProbe probe{};
 
     bool isAncestor(int a, int b) const {
         for (int steps = 0; b != -1 && b >= 0 && b < count && steps < count; b = parent[b], ++steps)
@@ -148,15 +149,25 @@ struct ResolvedHierarchy {
 static bool TryLoadHierarchyFromTransform(Snapshot& m, U nativeTransform, bool walkToTopRoot, ResolvedHierarchy& out)
 {
     if (nativeTransform <= 0x10000) return false;
+    const U sourceNative = nativeTransform;
     const U hierarchy = m.ptr(nativeTransform, 0x28);
     if (hierarchy <= 0x10000) return false;
     const U matrices = m.ptr(hierarchy, 0x18);
     const U parents = m.ptr(hierarchy, 0x20);
     const U pointers = m.ptr(hierarchy, 0x30);
     std::int32_t count = 0;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048) {
-        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 2048)
+    const bool read38 = m.get(hierarchy + 0x38, count);
+    const std::int32_t count38 = count;
+    const bool usedFallback = !read38 || count < 2 || count > 2048;
+    std::int32_t count10 = 0;
+    bool read10 = false;
+    if (usedFallback) {
+        read10 = m.get(hierarchy + 0x10, count);
+        count10 = count;
+        if (!read10 || count < 2 || count > 2048)
             return false;
+    } else {
+        read10 = m.bytes(hierarchy + 0x10, &count10, sizeof(count10));
     }
 
     std::vector<TRS> local(static_cast<std::size_t>(count));
@@ -200,6 +211,14 @@ static bool TryLoadHierarchyFromTransform(Snapshot& m, U nativeTransform, bool w
     out.native = nativeTransform;
     out.hierarchy = hierarchy;
     out.matrices = matrices;
+    out.probe.sourceNative = sourceNative;
+    out.probe.parents = parents;
+    out.probe.transforms = pointers;
+    out.probe.count38 = count38;
+    out.probe.count10 = count10;
+    out.probe.read38 = read38;
+    out.probe.read10 = read10;
+    out.probe.usedFallback = usedFallback;
     out.parents = parents;
     out.pointers = pointers;
     out.count = count;
@@ -223,26 +242,38 @@ static bool ResolveViewHierarchy(Snapshot& m, U view, ResolvedHierarchy& out)
     };
 
     // Priority 1: Direct HeadPosition at +0xE8 (3-hop fast path)
-    if (tryManagedTransform(m.ptr(view, 0xE8), true))
+    if (tryManagedTransform(m.ptr(view, 0xE8), true)) {
+        out.probe.source = 1;
         return true;
+    }
 
     // Priority 2: CharacterMovementView._transform (+0x20 -> +0x20)
     const U movement = m.ptr(view, 0x20);
-    if (movement > 0x10000 && tryManagedTransform(m.ptr(movement, 0x20), true))
+    if (movement > 0x10000 && tryManagedTransform(m.ptr(movement, 0x20), true)) {
+        out.probe.source = 2;
         return true;
+    }
 
     // Priority 3: Animation views
     const U animation = m.ptr(view, 0x28);
     if (animation > 0x10000) {
         const U torso = m.ptr(animation, 0x30);
-        if (torso > 0x10000 && tryManagedTransform(m.ptr(torso, 0x20), true))
+        if (torso > 0x10000 && tryManagedTransform(m.ptr(torso, 0x20), true)) {
+            out.probe.source = 3;
             return true;
+        }
         const U head = m.ptr(animation, 0x28);
-        if (head > 0x10000 && tryManagedTransform(m.ptr(head, 0x20), true))
+        if (head > 0x10000 && tryManagedTransform(m.ptr(head, 0x20), true)) {
+            out.probe.source = 4;
             return true;
+        }
     }
 
-    return TryLoadHierarchyFromTransform(m, m.ptr(view, 0x10), false, out);
+    if (TryLoadHierarchyFromTransform(m, m.ptr(view, 0x10), false, out)) {
+        out.probe.source = 5;
+        return true;
+    }
+    return false;
 }
 
 static const int kDefaultBoneMapMan[94] = {
@@ -1129,6 +1160,7 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
         m.ptr(native, 0x28) != hierarchy || m.ptr(hierarchy, 0x18) != matrices)
         return false;
 
+    out.probe = rh.probe;
     out.matrices = matrices;
     out.nativeTransform = native;
     out.hierarchy = hierarchy;
@@ -1600,6 +1632,7 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
         }
     }
 
+    out.probe = rh.probe;
     out.matrices = matrices;
     out.nativeTransform = native;
     out.hierarchy = hierarchy;
