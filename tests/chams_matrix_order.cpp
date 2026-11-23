@@ -1,6 +1,3 @@
-// Regression test for the column-major storage / matrix multiplication contract.
-// Build on Windows: cl /nologo /EHsc /std:c++17 tests\\chams_matrix_order.cpp
-// Build with GCC/Clang: c++ -std=c++17 tests/chams_matrix_order.cpp -o chams_matrix_order
 #include "../VeoxDMA/SDK/Matrix4x4.h"
 #include <cmath>
 #include <cstdio>
@@ -44,22 +41,18 @@ bool Near(Point a, Point b) {
            std::fabs(a.y-b.y) < 1e-5f &&
            std::fabs(a.z-b.z) < 1e-5f;
 }
-} // namespace
+}
 
 int main() {
     const Matrix4x4 rotate = RotateZ90();
     const Matrix4x4 translate = Translation(10.f, 5.f, 0.f);
 
-    // Matrix4x4::operator* uses matrix[col][row] storage. In transform
-    // space A * B applies A first, then B, unlike ordinary column-vector math.
     if (!Near(Transform(rotate * translate, {1.f, 0.f, 0.f}),
               {10.f, 6.f, 0.f})) {
         std::fputs("column-major multiplication contract failed\n", stderr);
         return 1;
     }
 
-    // A mesh vertex at (2,0,0) is exactly at the bone's bind-pose pivot.
-    // Unity skinning transforms it into that bone's current world pivot.
     const Matrix4x4 inverseBind = Translation(-2.f, 0.f, 0.f);
     const Matrix4x4 boneWorld = rotate * translate;
     const Matrix4x4 skin = inverseBind * boneWorld;
@@ -69,7 +62,6 @@ int main() {
         return 1;
     }
 
-    // Reversing the operands does NOT produce the same transform.
     if (Near(Transform(boneWorld * inverseBind, {2.f, 0.f, 0.f}),
              {10.f, 5.f, 0.f})) {
         std::fputs("matrix multiplication is unexpectedly commutative\n", stderr);
