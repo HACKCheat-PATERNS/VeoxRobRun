@@ -159,8 +159,6 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 		CharacterMesh::Skin(g_charMesh, ent.boneWorldMatrices.data(),
 			safeBoneCount, activeBoneMap, skinned.data());
 
-		// Render only a sufficiently complete skinned mesh. Incomplete poses
-		// must not become detached heads, isolated limbs or partial capsules.
 		const auto coverage = CharacterMesh::MeasureCoverage(g_charMesh, skinned.data());
 		if (coverage.CompleteEnough()) {
 			if (CharacterMesh::Draw(dl, g_charMesh, skinned.data(), vp,
@@ -179,7 +177,6 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 			}
 		}
 	}
-	// No geometric fallback: skip Chams for entities without a usable mesh.
 }
 
 static void DrawOffscreenArrow(ImDrawList* dl, int screenW, int screenH,
