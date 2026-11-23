@@ -5182,24 +5182,10 @@ static void UpdateInternal()
                     const float maxDeltaSq = 0.25f;
                     if (!snapPose && ConfigInstance.Player.PoseSmoothing &&
                         rig.smoothedValid && rig.smoothedBones.size() == rig.bones.size()) {
-                        // A large joint displacement is a WHOLE-pose transition.
-                        // Snapping one arm while smoothing the torso independently
-                        // breaks the hierarchy and causes visible limb/body jumps.
-                        for (std::size_t i = 0; i < rig.bones.size(); ++i) {
-                            const auto& old = rig.smoothedBones[i];
-                            const auto& cur = rig.bones[i];
-                            const float dax = cur.a.x - old.a.x;
-                            const float day = cur.a.y - old.a.y;
-                            const float daz = cur.a.z - old.a.z;
-                            const float dbx = cur.b.x - old.b.x;
-                            const float dby = cur.b.y - old.b.y;
-                            const float dbz = cur.b.z - old.b.z;
-                            if (dax*dax + day*day + daz*daz > maxDeltaSq ||
-                                dbx*dbx + dby*dby + dbz*dbz > maxDeltaSq) {
-                                snapPose = true;
-                                break;
-                            }
-                        }
+                        // A single limb jump snaps the entire coherent pose,
+                        // not that limb alone.
+                        snapPose = PoseFrameSelector::HasLargeJointDelta(
+                            rig.smoothedBones, rig.bones, maxDeltaSq);
                         if (!snapPose && needChamsMatrices &&
                             rig.smoothedWorldMatrices.size() == rig.worldMatrices.size()) {
                             for (std::size_t i = 0; i < rig.worldMatrices.size(); ++i) {
