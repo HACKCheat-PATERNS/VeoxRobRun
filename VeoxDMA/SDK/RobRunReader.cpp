@@ -4140,7 +4140,7 @@ static void UpdateInternal()
         // ---------------------------------------------------------------
         const std::uint64_t now = GetTickCount64();
         auto logRigCountProbe = [&](const char* event, std::int32_t id,
-                                    const Skeleton::RigLayout& layout) {
+                                    const Skeleton::RigLayout& layout, std::uintptr_t view, std::uintptr_t characterModel) {
             const auto& p = layout.probe;
             std::int32_t live38 = 0;
             std::int32_t live10 = 0;
@@ -4160,7 +4160,7 @@ static void UpdateInternal()
                 DmaReadFresh(layout.hierarchy + 0x38, &live38, sizeof(live38));
             const bool count10Ok = layout.hierarchy > 0x10000 &&
                 DmaReadFresh(layout.hierarchy + 0x10, &live10, sizeof(live10));
-            DebugLog::Log("RigCountDiag event=%s id=%d source=%u sourceNative=%llx rootNative=%llx hierarchy=%llx matrices=%llx parents=%llx transforms=%llx selectedCount=%d build38=%d/%d build10=%d/%d usedFallback=%d live38=%d/%d live10=%d/%d liveHierarchy=%d/%llx liveMatrices=%d/%llx liveParents=%d/%llx liveTransforms=%d/%llx segments=%zu missing=%03X",
+            DebugLog::Log("RigCountDiag event=%s id=%d source=%u sourceNative=%llx rootNative=%llx hierarchy=%llx matrices=%llx parents=%llx transforms=%llx selectedCount=%d build38=%d/%d build10=%d/%d live38=%d/%d live10=%d/%d liveHierarchy=%d/%llx liveMatrices=%d/%llx liveParents=%d/%llx liveTransforms=%d/%llx segments=%zu missing=%03X",
                 event, id, static_cast<unsigned int>(p.source),
                 static_cast<unsigned long long>(p.sourceNative),
                 static_cast<unsigned long long>(layout.nativeTransform),
@@ -4169,7 +4169,7 @@ static void UpdateInternal()
                 static_cast<unsigned long long>(p.parents),
                 static_cast<unsigned long long>(p.transforms), layout.count,
                 static_cast<int>(p.read38), p.count38,
-                static_cast<int>(p.read10), p.count10, static_cast<int>(p.usedFallback),
+                static_cast<int>(p.read10), p.count10,
                 static_cast<int>(count38Ok), live38,
                 static_cast<int>(count10Ok), live10,
                 static_cast<int>(hierarchyOk), static_cast<unsigned long long>(liveHierarchy),
@@ -4177,6 +4177,74 @@ static void UpdateInternal()
                 static_cast<int>(parentsOk), static_cast<unsigned long long>(liveParents),
                 static_cast<int>(transformsOk), static_cast<unsigned long long>(liveTransforms),
                 layout.segments.size(), static_cast<unsigned int>(RigMissingLimbMask(layout)));
+            constexpr std::uint64_t maxAddress = 0x00007FFFFFFFFFFFULL;
+            auto safeAddress = [](std::uint64_t address) {
+                return address > 0x10000 && address < 0x00007FFFFFFFFFFFULL;
+            };
+            auto readPointer = [&](std::uint64_t base, std::uint64_t offset) -> std::uint64_t {
+                std::uint64_t value = 0;
+                if (!safeAddress(base) || base > maxAddress - offset ||
+                    !DmaReadFresh(base + offset, &value, sizeof(value)) || !safeAddress(value))
+                    return 0;
+                return value;
+            };
+            auto readInt = [&](std::uint64_t base, std::uint64_t offset,
+                               std::int32_t& value) -> bool {
+                value = -1;
+                return safeAddress(base) && base <= maxAddress - offset &&
+                    DmaReadFresh(base + offset, &value, sizeof(value));
+            };
+            const std::uint64_t skeleton = readPointer(characterModel, 0x138);
+            const std::uint64_t description = readPointer(skeleton, 0x10);
+            const std::uint64_t bonesData = readPointer(skeleton, 0x18);
+            const std::uint64_t hierarchyData = readPointer(description, 0x28);
+            std::int32_t configCount = -1, dataSize = -1, rootIndex = -1;
+            const bool configCountOk = readInt(description, 0x10, configCount);
+            const bool dataSizeOk = readInt(description, 0x14, dataSize);
+            const bool rootIndexOk = readInt(description, 0x34, rootIndex);
+            DebugLog::Log("RigAltSource event=%s id=%d character=%llx skeleton=%llx description=%llx bonesData=%llx hierarchyData=%llx bonesCount=%d/%d plausible=%d dataSize=%d/%d rootIndex=%d/%d",
+                event, id,
+                static_cast<unsigned long long>(characterModel),
+                static_cast<unsigned long long>(skeleton),
+                static_cast<unsigned long long>(description),
+                static_cast<unsigned long long>(bonesData),
+                static_cast<unsigned long long>(hierarchyData),
+                static_cast<int>(configCountOk), configCount,
+                static_cast<int>(configCountOk && configCount >= 2 && configCount <= 2048),
+                static_cast<int>(dataSizeOk), dataSize,
+                static_cast<int>(rootIndexOk), rootIndex);
+            if (std::strcmp(event, "built-full") == 0)
+                return;
+
+            const std::uint64_t movement = readPointer(view, 0x20);
+            const std::uint64_t animation = readPointer(view, 0x28);
+            const std::uint64_t torso = readPointer(animation, 0x30);
+            const std::uint64_t head = readPointer(animation, 0x28);
+            struct AlternativeRoute {
+                const char* name;
+                std::uint64_t managed;
+            };
+            const AlternativeRoute routes[] = {
+                {"movement", readPointer(movement, 0x20)},
+                {"animation-torso", readPointer(torso, 0x20)},
+                {"animation-head", readPointer(head, 0x20)}
+            };
+            for (const auto& route : routes) {
+                const std::uint64_t native = readPointer(route.managed, 0x10);
+                const std::uint64_t altHierarchy = readPointer(native, 0x28);
+                const std::uint64_t altMatrices = readPointer(altHierarchy, 0x18);
+                std::int32_t altCount = -1;
+                const bool countOk = readInt(altHierarchy, 0x38, altCount);
+                DebugLog::Log("RigAltRoute event=%s id=%d route=%s managed=%llx native=%llx hierarchy=%llx matrices=%llx count38=%d/%d plausible=%d sameHierarchy=%d",
+                    event, id, route.name,
+                    static_cast<unsigned long long>(route.managed),
+                    static_cast<unsigned long long>(native),
+                    static_cast<unsigned long long>(altHierarchy),
+                    static_cast<unsigned long long>(altMatrices),
+                    static_cast<int>(countOk), altCount,
+                    static_cast<int>(countOk && altCount >= 2 && altCount <= 2048),
+                    static_cast<int>(altHierarchy != 0 && altHierarchy == layout.hierarchy));
+            }
         };
         std::vector<std::size_t> lateResolve;
         int rebuildBudget = fullMapFastMode ? 0 : 1;
@@ -4277,7 +4345,7 @@ static void UpdateInternal()
                             w.entityId, static_cast<unsigned long long>(viewPtr),
                             static_cast<unsigned long long>(rig.layout.matrices), rig.layout.count,
                             static_cast<unsigned int>(RigMissingLimbMask(rig.layout)));
-                        logRigCountProbe("invalid-old", w.entityId, rig.layout);
+                        logRigCountProbe("invalid-old", w.entityId, rig.layout, viewPtr, w.characterModel);
                     }
                     rig.layoutStamp = now;
                     rig.layoutValid = false;
@@ -4301,7 +4369,7 @@ static void UpdateInternal()
                                 rig.layout.segments.size(), candidate.segments.size(),
                                 rig.layout.count, candidate.count);
                         if (ConfigInstance.Player.Chams)
-                            logRigCountProbe("upgrade", w.entityId, candidate);
+                            logRigCountProbe("upgrade", w.entityId, candidate, viewPtr, w.characterModel);
                         if (RigMissingLimbMask(candidate) == 0)
                             rig.diagFullLayoutLogged = true;
                         rig.diagMissingMask = RigMissingLimbMask(candidate);
@@ -4322,7 +4390,7 @@ static void UpdateInternal()
                             static_cast<unsigned int>(ok ? RigMissingLimbMask(candidate) : 0xFFFF),
                             limbScore(rig.layout), ok ? limbScore(candidate) : -1, rig.upgradeAttempts);
                         if (ok)
-                            logRigCountProbe("upgrade-nochange", w.entityId, candidate);
+                            logRigCountProbe("upgrade-nochange", w.entityId, candidate, viewPtr, w.characterModel);
                         rig.diagLastUpgradeLogMs = now;
                     }
                 } else if (!incomplete) {
@@ -4353,7 +4421,7 @@ static void UpdateInternal()
                     if (ConfigInstance.Player.Chams &&
                         (missing != 0 || !rig.diagFullLayoutLogged))
                         logRigCountProbe(missing != 0 ? "built-partial" : "built-full",
-                            w.entityId, candidate);
+                            w.entityId, candidate, viewPtr, w.characterModel);
                     if (missing == 0)
                         rig.diagFullLayoutLogged = true;
                     rig.diagMissingMask = missing;
