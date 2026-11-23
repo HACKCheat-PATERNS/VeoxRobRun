@@ -178,6 +178,24 @@ inline void Skin(const Mesh& mesh,
             std::memset(&skin[b], 0, sizeof(Matrix4x4));
             continue;
         }
+        // A zeroed world matrix means the bone failed pose validation.
+        // Never treat it as identity: that pulls weighted vertices towards
+        // the mesh bind pose and makes individual limbs jump for one frame.
+        const auto& world = boneWorld[skel].matrix;
+        bool validWorld = std::abs(world[3][3] - 1.0f) < 1e-4f;
+        for (int c = 0; c < 4 && validWorld; ++c)
+            for (int row = 0; row < 4; ++row)
+                if (!std::isfinite(world[c][row])) {
+                    validWorld = false;
+                    break;
+                }
+        if (!validWorld) {
+            std::memset(&skin[b], 0, sizeof(Matrix4x4));
+            continue;
+        }
+        // Matrix4x4 stores matrix[column][row]; its operator* composes
+        // column-vector transforms in reverse order. This expression applies
+        // bindPose first and boneWorld second (Unity skinning convention).
         skin[b] = mesh.bindPoses[b] * boneWorld[skel];
         mapped[b] = 1;
     }
@@ -215,11 +233,20 @@ inline void Skin(const Mesh& mesh,
 
     for (std::size_t v = 0; v < mesh.vertices.size(); ++v) {
         const Vertex& vt = mesh.vertices[v];
-        float mw = 0;
-        for (int j = 0; j < 4; ++j)
-            if (vt.weights[j] > 1e-6f && mapped[vt.bones[j]])
-                mw += vt.weights[j];
-        if (mw < 0.01f) { outPos[v] = {NAN_VAL, 0, 0}; continue; }
+        float totalWeight = 0.f, mw = 0.f;
+        for (int j = 0; j < 4; ++j) {
+            const float w = vt.weights[j];
+            if (w <= 1e-6f) continue;
+            totalWeight += w;
+            if (mapped[vt.bones[j]]) mw += w;
+        }
+        // Renormalizing only the surviving influences would collapse a vertex
+        // onto a different bone when one matrix disappears. Omit that vertex
+        // (and its triangles) until the complete blend is available instead.
+        if (mw < 0.01f || totalWeight - mw > 0.01f) {
+            outPos[v] = {NAN_VAL, 0, 0};
+            continue;
+        }
 
         float wx = 0, wy = 0, wz = 0;
         for (int j = 0; j < 4; ++j) {
