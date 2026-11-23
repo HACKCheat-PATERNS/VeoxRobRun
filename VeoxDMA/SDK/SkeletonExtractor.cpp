@@ -157,18 +157,11 @@ static bool TryLoadHierarchyFromTransform(Snapshot& m, U nativeTransform, bool w
     const U pointers = m.ptr(hierarchy, 0x30);
     std::int32_t count = 0;
     const bool read38 = m.get(hierarchy + 0x38, count);
+    if (!read38 || count < 2 || count > 2048)
+        return false;
     const std::int32_t count38 = count;
-    const bool usedFallback = !read38 || count < 2 || count > 2048;
     std::int32_t count10 = 0;
-    bool read10 = false;
-    if (usedFallback) {
-        read10 = m.get(hierarchy + 0x10, count);
-        count10 = count;
-        if (!read10 || count < 2 || count > 2048)
-            return false;
-    } else {
-        read10 = m.bytes(hierarchy + 0x10, &count10, sizeof(count10));
-    }
+    const bool read10 = m.bytes(hierarchy + 0x10, &count10, sizeof(count10));
 
     std::vector<TRS> local(static_cast<std::size_t>(count));
     std::vector<std::int32_t> parent(static_cast<std::size_t>(count));
@@ -218,7 +211,6 @@ static bool TryLoadHierarchyFromTransform(Snapshot& m, U nativeTransform, bool w
     out.probe.count10 = count10;
     out.probe.read38 = read38;
     out.probe.read10 = read10;
-    out.probe.usedFallback = usedFallback;
     out.parents = parents;
     out.pointers = pointers;
     out.count = count;
@@ -1706,10 +1698,8 @@ bool ResolveRigTarget(U view, const Read& read, RigTarget& out)
     U matrices = m.ptr(hierarchy, 0x18);
     std::int32_t count = 0;
     if (matrices <= 0x10000) return false;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048) {
-        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 2048)
-            return false;
-    }
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048)
+        return false;
 
     out.view = view;
     out.movementView = movement;
@@ -1746,10 +1736,8 @@ bool RootWorldPosition(U view, const Read& read, Vec& out)
     U parents = m.ptr(hierarchy, 0x20);
     std::int32_t count = 0;
     if (matrices <= 0x10000 || parents <= 0x10000) return false;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048) {
-        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 2048)
-            return false;
-    }
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048)
+        return false;
 
     // The root is the only node without a parent, so its local TRS is already
     // the world transform. Everything below it is composed by SampleLayout.
