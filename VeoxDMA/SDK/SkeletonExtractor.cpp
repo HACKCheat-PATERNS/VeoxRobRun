@@ -1889,6 +1889,16 @@ bool SampleSkinParallel(U view, const Read& read, SkinParallelSample& out)
                         if (tryBinding(data, count, stride, slot,
                                        static_cast<int>(offset))) return true;
             }
+            // Native {data, 64-bit size, 64-bit capacity}.
+            const U count64 = u64(offset + 8);
+            const U capacity64 = u64(offset + 16);
+            if (count64 >= 16 && count64 <= 512 &&
+                capacity64 >= count64 && capacity64 <= 2048) {
+                for (int stride : {8, 16})
+                    for (int slot = 0; slot < stride; slot += 8)
+                        if (tryBinding(data, static_cast<std::uint32_t>(count64),
+                                       stride, slot, static_cast<int>(offset))) return true;
+            }
             // Native {begin, end, endCapacity}.
             const U end = u64(offset + 8);
             const U endCapacity = u64(offset + 16);
