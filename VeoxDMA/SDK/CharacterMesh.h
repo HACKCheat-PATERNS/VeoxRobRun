@@ -153,8 +153,6 @@ inline bool Load(const std::string& path, Mesh& mesh)
 // boneWorld:  array of world-space 4x4 matrices, one per skeleton bone
 //             (column-major: matrix[col][row], matching Matrix4x4).
 // boneMap:    meshBoneIndex → skeletonBoneIndex (size = mesh.numBones).
-//             -1 means unmapped; intentionally excluded facial joints use
-//             the head transform with the HEAD bind pose instead.
 // outPos:     output world positions (size = mesh.vertices.size()).
 inline void Skin(const Mesh& mesh,
                  const Matrix4x4* boneWorld, int skeletonBoneCount,
@@ -181,9 +179,6 @@ inline void Skin(const Mesh& mesh,
             std::memset(&skin[b], 0, sizeof(Matrix4x4));
             continue;
         }
-        // A zeroed world matrix means the bone failed pose validation.
-        // Never treat it as identity: that pulls weighted vertices towards
-        // the mesh bind pose and makes individual limbs jump for one frame.
         const auto& world = boneWorld[skel].matrix;
         bool validWorld = std::abs(world[3][3] - 1.0f) < 1e-4f;
         for (int c = 0; c < 4 && validWorld; ++c)
@@ -196,9 +191,6 @@ inline void Skin(const Mesh& mesh,
             std::memset(&skin[b], 0, sizeof(Matrix4x4));
             continue;
         }
-        // Matrix4x4 stores matrix[column][row]; its operator* composes
-        // column-vector transforms in reverse order. This expression applies
-        // bindPose first and boneWorld second (Unity skinning convention).
         skin[b] = mesh.bindPoses[binding.bindPoseBone] * boneWorld[skel];
         mapped[b] = 1;
     }
@@ -243,9 +235,6 @@ inline void Skin(const Mesh& mesh,
             totalWeight += w;
             if (mapped[vt.bones[j]]) mw += w;
         }
-        // Renormalizing only the surviving influences would collapse a vertex
-        // onto a different bone when one matrix disappears. Omit that vertex
-        // (and its triangles) until the complete blend is available instead.
         if (mw < 0.01f || totalWeight - mw > 0.01f) {
             outPos[v] = {NAN_VAL, 0, 0};
             continue;
@@ -277,9 +266,6 @@ inline void Skin(const Mesh& mesh,
     }
 }
 
-// Count intact triangles before touching the draw list. A single surviving
-// triangle is not a usable character mesh: treating it as success suppresses
-// the full-body capsule fallback when hands, torso or legs have disappeared.
 struct SkinCoverage {
     std::size_t valid = 0;
     std::size_t total = 0;
@@ -311,7 +297,6 @@ inline SkinCoverage MeasureCoverage(const Mesh& mesh, const Vector3* worldPos)
         const std::uint16_t ia = mesh.indices[t];
         const std::uint16_t ib = mesh.indices[t + 1];
         const std::uint16_t ic = mesh.indices[t + 2];
-        // Load() rejects out-of-range indices for every loaded mesh.
         const float centerY = (mesh.vertices[ia].y +
                                mesh.vertices[ib].y +
                                mesh.vertices[ic].y) / 3.f;
