@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <windows.h>
 #include "Matrix4x4.h"
+#include "ChamsBoneBinding.h"
 #include "DebugLog.h"
 
 namespace CharacterMesh {
@@ -152,7 +153,8 @@ inline bool Load(const std::string& path, Mesh& mesh)
 // boneWorld:  array of world-space 4x4 matrices, one per skeleton bone
 //             (column-major: matrix[col][row], matching Matrix4x4).
 // boneMap:    meshBoneIndex → skeletonBoneIndex (size = mesh.numBones).
-//             -1 means unmapped (identity fallback).
+//             -1 means unmapped; intentionally excluded facial joints use
+//             the head transform with the HEAD bind pose instead.
 // outPos:     output world positions (size = mesh.vertices.size()).
 inline void Skin(const Mesh& mesh,
                  const Matrix4x4* boneWorld, int skeletonBoneCount,
@@ -173,7 +175,8 @@ inline void Skin(const Mesh& mesh,
     std::uint8_t* mapped = s_mapped.data();
     std::memset(mapped, 0, mesh.numBones);
     for (std::uint32_t b = 0; b < mesh.numBones; ++b) {
-        int skel = boneMap ? boneMap[b] : -1;
+        const auto binding = ChamsBoneBinding::Resolve(b, mesh.numBones, boneMap);
+        const int skel = binding.skeletonBone;
         if (skel < 0 || skel >= skeletonBoneCount) {
             std::memset(&skin[b], 0, sizeof(Matrix4x4));
             continue;
@@ -196,7 +199,7 @@ inline void Skin(const Mesh& mesh,
         // Matrix4x4 stores matrix[column][row]; its operator* composes
         // column-vector transforms in reverse order. This expression applies
         // bindPose first and boneWorld second (Unity skinning convention).
-        skin[b] = mesh.bindPoses[b] * boneWorld[skel];
+        skin[b] = mesh.bindPoses[binding.bindPoseBone] * boneWorld[skel];
         mapped[b] = 1;
     }
     // reject mis-mapped bones whose skin matrix drifts far from the pack
