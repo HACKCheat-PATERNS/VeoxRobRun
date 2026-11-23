@@ -204,9 +204,26 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 		CharacterMesh::Skin(g_charMesh, ent.boneWorldMatrices.data(),
 			safeBoneCount, activeBoneMap, skinned.data());
 
-		if (CharacterMesh::Draw(dl, g_charMesh, skinned.data(), vp,
-			screenW, screenH, chamsCol))
-			return;
+		// Reject incomplete meshes before drawing any triangles. The old Draw()
+		// returned true after just one triangle and hid the capsule fallback,
+		// leaving floating heads, missing legs or isolated arms on screen.
+		const auto coverage = CharacterMesh::MeasureCoverage(g_charMesh, skinned.data());
+		if (coverage.CompleteEnough()) {
+			if (CharacterMesh::Draw(dl, g_charMesh, skinned.data(), vp,
+				screenW, screenH, chamsCol))
+				return;
+		} else {
+			static ULONGLONG lastCoverageLog = 0;
+			const ULONGLONG now = GetTickCount64();
+			if (now - lastCoverageLog >= 2000) {
+				DLOG("PlayerEsp: partial mesh rejected: %zu/%zu triangles; bands %zu/%zu %zu/%zu %zu/%zu (fallback to capsules)",
+					coverage.valid, coverage.total,
+					coverage.validByHeight[0], coverage.totalByHeight[0],
+					coverage.validByHeight[1], coverage.totalByHeight[1],
+					coverage.validByHeight[2], coverage.totalByHeight[2]);
+				lastCoverageLog = now;
+			}
+		}
 	}
 
 	const auto& bp = ent.bonePoints;
