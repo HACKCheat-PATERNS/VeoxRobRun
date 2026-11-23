@@ -16,6 +16,56 @@
 static CharacterMesh::Mesh g_charMesh;
 static bool g_charMeshLoadAttempted = false;
 
+enum class ChamsDiagReason : int {
+    Rendered,
+    MeshUnavailable,
+    MatricesUnavailable,
+    CoverageRejected,
+    DrawRejected,
+    InvalidRoot,
+    NearClip
+};
+
+static void LogChamsState(const RobRunReader::EntityData& ent,
+    ChamsDiagReason reason, const CharacterMesh::SkinCoverage* coverage = nullptr)
+{
+    struct State {
+        ChamsDiagReason reason = ChamsDiagReason::Rendered;
+        ULONGLONG timestamp = 0;
+        bool initialized = false;
+    };
+    static std::unordered_map<std::int32_t, State> states;
+    auto& state = states[ent.entityId];
+    const ULONGLONG now = GetTickCount64();
+    if (state.initialized && state.reason == reason &&
+        (reason == ChamsDiagReason::Rendered || now - state.timestamp < 5000))
+        return;
+
+    const bool shouldLog = reason != ChamsDiagReason::Rendered ||
+        (state.initialized && state.reason != ChamsDiagReason::Rendered);
+    if (shouldLog) {
+        static const char* names[] = {
+            "rendered", "mesh_unavailable", "matrices_unavailable",
+            "coverage_rejected", "draw_rejected", "invalid_root", "near_clip"
+        };
+        const int current = static_cast<int>(reason);
+        const int previous = state.initialized ? static_cast<int>(state.reason) : -1;
+        DebugLog::Log("ChamsDiag id=%d reason=%s previous=%s segments=%zu matrices=%zu boneMap=%zu coverage=%zu/%zu bands=%zu/%zu,%zu/%zu,%zu/%zu",
+            ent.entityId, names[current], previous >= 0 ? names[previous] : "initial",
+            ent.bones.size(), ent.boneWorldMatrices.size(), ent.boneMap.size(),
+            coverage ? coverage->valid : 0, coverage ? coverage->total : 0,
+            coverage ? coverage->validByHeight[0] : 0,
+            coverage ? coverage->totalByHeight[0] : 0,
+            coverage ? coverage->validByHeight[1] : 0,
+            coverage ? coverage->totalByHeight[1] : 0,
+            coverage ? coverage->validByHeight[2] : 0,
+            coverage ? coverage->totalByHeight[2] : 0);
+    }
+    state.reason = reason;
+    state.timestamp = now;
+    state.initialized = true;
+}
+
 static ImVec2 MeasureText(const char* text, float size)
 {
 	ImFont* font = ImGui::GetFont();
@@ -100,14 +150,18 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 		return;
 
 	const Vector3 root = ent.position;
-	if (std::abs(root.x) < 0.1f && std::abs(root.y) < 0.1f && std::abs(root.z) < 0.1f)
+	if (std::abs(root.x) < 0.1f && std::abs(root.y) < 0.1f && std::abs(root.z) < 0.1f) {
+		LogChamsState(ent, ChamsDiagReason::InvalidRoot);
 		return;
+	}
 
 	// Reject entities inside the near camera clipping plane
 	const float rootClipW = vp.matrix[0][3] * root.x + vp.matrix[1][3] * root.y +
 		vp.matrix[2][3] * root.z + vp.matrix[3][3];
-	if (!std::isfinite(rootClipW) || rootClipW < 0.40f)
+	if (!std::isfinite(rootClipW) || rootClipW < 0.40f) {
+		LogChamsState(ent, ChamsDiagReason::NearClip);
 		return;
+	}
 
 	ImU32 chamsCol = Esp::ShadeColour(pcfg.ChamsColour, pcfg.ChamsAlpha);
 	if (pcfg.ChamsVisCheck) {
@@ -162,9 +216,13 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 		const auto coverage = CharacterMesh::MeasureCoverage(g_charMesh, skinned.data());
 		if (coverage.CompleteEnough()) {
 			if (CharacterMesh::Draw(dl, g_charMesh, skinned.data(), vp,
-				screenW, screenH, chamsCol))
+				screenW, screenH, chamsCol)) {
+				LogChamsState(ent, ChamsDiagReason::Rendered, &coverage);
 				return;
+			}
+			LogChamsState(ent, ChamsDiagReason::DrawRejected, &coverage);
 		} else {
+			LogChamsState(ent, ChamsDiagReason::CoverageRejected, &coverage);
 			static ULONGLONG lastCoverageLog = 0;
 			const ULONGLONG now = GetTickCount64();
 			if (now - lastCoverageLog >= 2000) {
@@ -176,6 +234,9 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 				lastCoverageLog = now;
 			}
 		}
+	} else {
+		LogChamsState(ent, g_charMesh.valid
+			? ChamsDiagReason::MatricesUnavailable : ChamsDiagReason::MeshUnavailable);
 	}
 }
 
