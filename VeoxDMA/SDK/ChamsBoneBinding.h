@@ -1,11 +1,6 @@
 #pragma once
 #include <cstdint>
 
-// The packaged 94-bone character mesh contains facial geometry weighted to
-// 33 small facial joints. The read-only rig intentionally does not resolve
-// those facial joints: mapping them to -1 is not a transient DMA failure.
-// Rigidly attach their vertices to the head's own bind-pose transform, rather
-// than dropping the face or borrowing an unrelated facial bind pose.
 namespace ChamsBoneBinding {
 
 struct Binding {
@@ -22,11 +17,11 @@ inline Binding Resolve(std::uint32_t meshBone, std::uint32_t meshBoneCount,
     if (mapped >= 0)
         return {mapped, meshBone};
 
-    constexpr std::uint32_t kHeadBone = 4; // M_head_1_jnt
+    constexpr std::uint32_t kHeadBone = 4;
     if (meshBoneCount == 94 && meshBone >= 6 && meshBone <= 38 &&
         boneMap[kHeadBone] >= 0)
         return {boneMap[kHeadBone], kHeadBone};
     return {};
 }
 
-} // namespace ChamsBoneBinding
+}
