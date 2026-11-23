@@ -4257,10 +4257,12 @@ static void UpdateInternal()
                     const bool primaryValid = productionSampled &&
                         idx < primaryMatrices.size() &&
                         primaryMatrices[idx].matrix[3][3] > 0.9f;
-                    const Vec primary = primaryValid ? Vec{
-                        primaryMatrices[idx].matrix[3][0],
-                        primaryMatrices[idx].matrix[3][1],
-                        primaryMatrices[idx].matrix[3][2]} : Vec{};
+                    const Vector3 primary = primaryValid
+                        ? Vector3(
+                            primaryMatrices[idx].matrix[3][0],
+                            primaryMatrices[idx].matrix[3][1],
+                            primaryMatrices[idx].matrix[3][2])
+                        : Vector3{};
                     DebugLog::Log("RigSkinBone event=%s id=%d index=%d primaryValid=%d primary=%.4f/%.4f/%.4f parallel=%.4f/%.4f/%.4f",
                         event, id, bone.first, static_cast<int>(primaryValid),
                         primary.x, primary.y, primary.z,
