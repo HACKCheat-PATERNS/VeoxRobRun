@@ -86,6 +86,38 @@ struct RigTarget {
     std::int32_t count = 0;
 };
 
+// Experimental read-only shadow path: renderer-native bone bindings. It never
+// replaces the production rig. A status below Sampled means there is no
+// independently validated set of world-space bone positions to compare.
+struct SkinParallelSample {
+    enum Status : std::uint8_t {
+        ViewUnavailable = 0,
+        RendererUnavailable = 1,
+        NativeBonesUnresolved = 2,
+        BoneBindingsFound = 3,
+        PoseUnavailable = 4,
+        Sampled = 5,
+        SnapshotChanged = 6
+    };
+    Status status = ViewUnavailable;
+    std::uint64_t renderer = 0;
+    std::uint64_t hierarchy = 0;
+    std::uint64_t matrices = 0;
+    std::uint32_t hierarchyCount = 0;
+    std::uint32_t rendererBoneCount = 0;
+    std::uint32_t bonesInHierarchy = 0;
+    std::int32_t lodIndex = -1;
+    std::int32_t nativeArrayOffset = -1;
+    std::int32_t nativeStride = 0;
+    std::vector<std::pair<std::int32_t, Vec>> worldPoints;
+};
+
+// Uses the native SkinnedMeshRenderer reference from the managed LOD tree,
+// then admits a bone-binding array only after validating native Transform
+// identity. Status is always populated; only true means worldPoints are fresh.
+bool SampleSkinParallel(std::uint64_t view, const ReadFn& freshRead,
+                        SkinParallelSample& out);
+
 // Resolves and validates the layout from a BattleCharacterEntityView.
 bool BuildLayoutFromView(std::uint64_t view, const ReadFn& read, RigLayout& out);
 
