@@ -3,9 +3,6 @@
 #include <cmath>
 #include <vector>
 
-// Select a WHOLE already-sampled pose, rather than taking independent medians
-// for every axis and bone. Mixing bone translations from three different poses
-// with the newest rotations breaks FK and can pull arms or torso off the mesh.
 namespace PoseFrameSelector {
 
 template <typename Segment>
@@ -20,8 +17,6 @@ int SelectCoherentFrame(const std::vector<Segment> (&frames)[3], int newest)
         const double dx = static_cast<double>(a.x) - b.x;
         const double dy = static_cast<double>(a.y) - b.y;
         const double dz = static_cast<double>(a.z) - b.z;
-        // Clip a single torn joint's contribution so it cannot dominate
-        // all the healthy bones. Compare pelvis-relative coordinates.
         return (std::min)(dx*dx + dy*dy + dz*dz, 0.64);
     };
 
@@ -38,13 +33,9 @@ int SelectCoherentFrame(const std::vector<Segment> (&frames)[3], int newest)
         }
     }
 
-    // The medoid is an actual sampled frame, including its rotations.
-    // Prefer newest on ties to avoid adding latency to a stationary pose.
     int chosen = newest;
     double best = distance[newest][(newest + 1) % 3] +
                   distance[newest][(newest + 2) % 3];
-    // Search most recent to oldest so equivalent stable samples prefer
-    // the freshest available pose instead of an arbitrary ring slot.
     for (int age = 0; age < 3; ++age) {
         const int i = (newest + 3 - age) % 3;
         const double score = distance[i][(i + 1) % 3] +
@@ -57,8 +48,6 @@ int SelectCoherentFrame(const std::vector<Segment> (&frames)[3], int newest)
     return chosen;
 }
 
-// A limb must never snap independently of its parent or torso.
-// This check is shared by the worker and its offline regression tests.
 template <typename Segment>
 bool HasLargeJointDelta(const std::vector<Segment>& previous,
                         const std::vector<Segment>& current,
@@ -78,4 +67,4 @@ bool HasLargeJointDelta(const std::vector<Segment>& previous,
     return false;
 }
 
-} // namespace PoseFrameSelector
+}
