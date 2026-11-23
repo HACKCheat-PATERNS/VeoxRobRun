@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <string>
 #include <utility>
+#include <unordered_map>
 
 namespace Skeleton {
 
@@ -1766,6 +1767,265 @@ bool MatchesRigTarget(const RigLayout& layout, const RigTarget& target)
         target.hierarchy == layout.hierarchy &&
         target.matrices == layout.matrices &&
         target.count == layout.count;
+}
+
+// This route intentionally doesn't call Unity's get_bones() or execute code
+// inside the target. Unity exposes bones via a native method, not a managed
+// field, so the native storage layout has to be discovered and validated on
+// the running build. A rejected candidate must never be treated as a bone list.
+bool SampleSkinParallel(U view, const Read& read, SkinParallelSample& out)
+{
+    out = SkinParallelSample{};
+    if (!read || view <= 0x10000)
+        return false;
+
+    constexpr U kMaxAddress = 0x00007FFFFFFFFFFFULL;
+    auto validPtr = [](U p) { return p > 0x10000 && p < 0x00007FFFFFFFFFFFULL; };
+    auto at = [&](U p, U offset, void* data, std::size_t size) {
+        return validPtr(p) && p <= kMaxAddress - offset &&
+            offset <= kMaxAddress - size && read(p + offset, data, size);
+    };
+    auto ptr = [&](U p, U offset) -> U {
+        U v = 0;
+        return at(p, offset, &v, sizeof(v)) && validPtr(v) ? v : 0;
+    };
+    auto i32 = [&](U p, U offset, std::int32_t& value) {
+        return at(p, offset, &value, sizeof(value));
+    };
+
+    // Managed LOD tree, verified through IL2CPP runtime type information.
+    Snapshot snapshot{read, {}};
+    const U customization = ptr(view, 0xB8);
+    if (!snapshot.is(customization, "CharacterCustomizationView")) {
+        out.status = SkinParallelSample::RendererUnavailable;
+        return false;
+    }
+    const U lods = ptr(customization, 0x20);
+    U lodCount = 0;
+    if (!at(lods, 0x18, &lodCount, sizeof(lodCount)) ||
+        lodCount == 0 || lodCount > 8) {
+        out.status = SkinParallelSample::RendererUnavailable;
+        return false;
+    }
+
+    RigTarget target{};
+    const bool targetOk = ResolveRigTarget(view, read, target);
+    if (targetOk) {
+        out.hierarchy = target.hierarchy;
+        out.matrices = target.matrices;
+        out.hierarchyCount = static_cast<std::uint32_t>(target.count);
+    }
+
+    struct Binding {
+        U array = 0;
+        std::uint32_t count = 0;
+        int slotOffset = 0;
+        int stride = 0;
+        int fieldOffset = -1;
+    } binding;
+
+    // Find a contiguous native Transform* binding array. Recognize both
+    // {data,size,capacity} and {begin,end,endCapacity} layouts, 8/16-byte
+    // elements. Guessing a pointer is NOT enough: three sampled entries must
+    // resolve to native Transforms in the same verified hierarchy.
+    auto discover = [&](U nativeRenderer, Binding& result) -> bool {
+        constexpr std::size_t kScanBytes = 0x520;
+        unsigned char header[kScanBytes]{};
+        if (!read(nativeRenderer, header, sizeof(header)))
+            return false;
+
+        auto u64 = [&](std::size_t off) -> U {
+            U v = 0;
+            if (off + sizeof(v) <= sizeof(header))
+                std::memcpy(&v, header + off, sizeof(v));
+            return v;
+        };
+        auto u32 = [&](std::size_t off) -> std::uint32_t {
+            std::uint32_t v = 0;
+            if (off + sizeof(v) <= sizeof(header))
+                std::memcpy(&v, header + off, sizeof(v));
+            return v;
+        };
+
+        int inspected = 0;
+        auto tryBinding = [&](U data, std::uint32_t count, int stride,
+                              int slot, int field) -> bool {
+            if (!targetOk || !validPtr(data) || count < 16 || count > 512 ||
+                inspected >= 20 || data > kMaxAddress - count * stride)
+                return false;
+            ++inspected;
+            const std::uint32_t sample[3] = {0u, count / 2, count - 1};
+            int confirmed = 0;
+            for (const auto idx : sample) {
+                U boneNative = 0;
+                if (!read(data + idx * stride + slot, &boneNative, sizeof(boneNative)) ||
+                    !validPtr(boneNative))
+                    continue;
+                U boneHierarchy = 0;
+                std::int32_t boneIndex = -1;
+                if (at(boneNative, 0x28, &boneHierarchy, sizeof(boneHierarchy)) &&
+                    boneHierarchy == target.hierarchy &&
+                    i32(boneNative, 0x30, boneIndex) &&
+                    boneIndex >= 0 && boneIndex < 2048)
+                    ++confirmed;
+            }
+            if (confirmed != 3)
+                return false;
+            result = {data, count, slot, stride, field};
+            return true;
+        };
+
+        for (std::size_t offset = 0; offset + 24 <= sizeof(header); offset += 8) {
+            const U data = u64(offset);
+            if (!validPtr(data))
+                continue;
+
+            // Native {data, 32-bit size, 32-bit capacity}.
+            const std::uint32_t count = u32(offset + 8);
+            const std::uint32_t capacity = u32(offset + 12);
+            if (count >= 16 && count <= 512 && capacity >= count && capacity <= 2048) {
+                for (int stride : {8, 16})
+                    for (int slot = 0; slot < stride; slot += 8)
+                        if (tryBinding(data, count, stride, slot,
+                                       static_cast<int>(offset))) return true;
+            }
+            // Native {begin, end, endCapacity}.
+            const U end = u64(offset + 8);
+            const U endCapacity = u64(offset + 16);
+            if (validPtr(end) && validPtr(endCapacity) && end > data &&
+                endCapacity >= end && endCapacity - data <= 512 * 16) {
+                for (int stride : {8, 16}) {
+                    const U bytes = end - data;
+                    if (bytes % stride != 0) continue;
+                    const U length = bytes / stride;
+                    if (length < 16 || length > 512) continue;
+                    for (int slot = 0; slot < stride; slot += 8)
+                        if (tryBinding(data, static_cast<std::uint32_t>(length),
+                                       stride, slot, static_cast<int>(offset))) return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    // Probe at most two body LODs per event. Expensive discovery never runs
+    // in the ordinary frame publication path, only in diagnostic events.
+    for (U lodIndex : {U(0), lodCount - 1}) {
+        if (lodIndex >= lodCount) continue;
+        const U lod = ptr(lods, 0x20 + lodIndex * sizeof(U));
+        const U body = ptr(lod, 0x38);
+        if (!snapshot.is(body, "SkinnedMeshRenderer"))
+            continue;
+        const U native = ptr(body, 0x10);
+        if (!native) continue;
+        out.renderer = body;
+        out.lodIndex = static_cast<std::int32_t>(lodIndex);
+        out.status = SkinParallelSample::NativeBonesUnresolved;
+        if (discover(native, binding))
+            break;
+    }
+    if (!binding.array)
+        return false;
+
+    out.rendererBoneCount = binding.count;
+    out.nativeStride = binding.stride;
+    out.nativeArrayOffset = binding.fieldOffset;
+    out.status = SkinParallelSample::BoneBindingsFound;
+
+    // Copy the independently resolved renderer binding array.
+    std::vector<unsigned char> raw(static_cast<std::size_t>(binding.count) *
+                                   static_cast<std::size_t>(binding.stride));
+    if (!read(binding.array, raw.data(), raw.size()))
+        return false;
+
+    const U pointers = ptr(target.hierarchy, 0x30);
+    const U parents = ptr(target.hierarchy, 0x20);
+    const U matrices = ptr(target.hierarchy, 0x18);
+    if (!pointers || !parents || !matrices || matrices != target.matrices)
+        return false;
+    const std::size_t count = static_cast<std::size_t>(target.count);
+    std::vector<U> hierarchyTransforms(count);
+    if (!read(pointers, hierarchyTransforms.data(), count * sizeof(U)))
+        return false;
+    std::unordered_map<U, std::int32_t> indices;
+    indices.reserve(count);
+    for (std::size_t i = 0; i < count; ++i)
+        if (validPtr(hierarchyTransforms[i]))
+            indices.emplace(hierarchyTransforms[i], static_cast<std::int32_t>(i));
+
+    std::vector<std::int32_t> selectedBones;
+    selectedBones.reserve(binding.count);
+    for (std::uint32_t i = 0; i < binding.count; ++i) {
+        U boneNative = 0;
+        std::memcpy(&boneNative,
+            raw.data() + static_cast<std::size_t>(i) * binding.stride +
+                binding.slotOffset, sizeof(boneNative));
+        const auto it = indices.find(boneNative);
+        if (it != indices.end() &&
+            std::find(selectedBones.begin(), selectedBones.end(), it->second) ==
+                selectedBones.end())
+            selectedBones.push_back(it->second);
+    }
+    out.bonesInHierarchy = static_cast<std::uint32_t>(selectedBones.size());
+    if (selectedBones.empty())
+        return false;
+
+    // Independent current snapshot and FK. The native bone-binding array is
+    // independent of the production selection, but live Transform positions
+    // still rely on the engine's hierarchy. Never read outside live count.
+    std::vector<std::int32_t> parent(count);
+    std::vector<TRS> local(count);
+    if (!read(parents, parent.data(), count * sizeof(parent[0])) ||
+        !read(matrices, local.data(), count * sizeof(TRS))) {
+        out.status = SkinParallelSample::PoseUnavailable;
+        return false;
+    }
+    std::int32_t finalCount = -1;
+    if (!i32(target.hierarchy, 0x38, finalCount) ||
+        finalCount != target.count ||
+        ptr(target.hierarchy, 0x18) != matrices ||
+        ptr(target.hierarchy, 0x20) != parents ||
+        ptr(target.hierarchy, 0x30) != pointers) {
+        out.status = SkinParallelSample::SnapshotChanged;
+        return false;
+    }
+
+    RigLayout temporary;
+    temporary.count = target.count;
+    temporary.parent = std::move(parent);
+    temporary.selected.assign(count, 0);
+    for (const auto index : selectedBones) {
+        const int p = temporary.parent[static_cast<std::size_t>(index)];
+        if (p >= 0 && p < target.count &&
+            temporary.segments.size() < 48) {
+            temporary.segments.push_back({p, index});
+            temporary.selected[static_cast<std::size_t>(p)] = 1;
+            temporary.selected[static_cast<std::size_t>(index)] = 1;
+        }
+    }
+    if (temporary.segments.empty()) {
+        out.status = SkinParallelSample::PoseUnavailable;
+        return false;
+    }
+    std::vector<Matrix4x4> world(count);
+    std::vector<BoneSegment> unused;
+    if (!ProcessPoseData(temporary, local.data(), local.size() * sizeof(TRS),
+                         unused, nullptr, nullptr, world.data())) {
+        out.status = SkinParallelSample::PoseUnavailable;
+        return false;
+    }
+
+    for (const auto index : selectedBones) {
+        if (out.worldPoints.size() >= 48) break;
+        const auto& w = world[static_cast<std::size_t>(index)];
+        Vec position{w.matrix[3][0], w.matrix[3][1], w.matrix[3][2]};
+        if (Finite(position))
+            out.worldPoints.push_back({index, position});
+    }
+    out.status = out.worldPoints.empty()
+        ? SkinParallelSample::PoseUnavailable
+        : SkinParallelSample::Sampled;
+    return out.status == SkinParallelSample::Sampled;
 }
 
 } // namespace Skeleton
