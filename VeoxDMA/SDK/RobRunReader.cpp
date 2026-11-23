@@ -17,6 +17,7 @@ extern void RequestReattach();
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -431,6 +432,8 @@ struct RigCacheEntry {
     // 1-frame pre-LateUpdate / torn-DMA flickers of any amplitude.
     std::vector<Skeleton::BoneSegment> relBoneHist[3];
     Skeleton::BonePoints relPtsHist[3]{};
+    // Same pelvis-relative median is used for Chams mesh translations.
+    std::vector<Skeleton::Vec> relWorldHist[3];
     int poseHistCount = 0;
     int poseHistCursor = 0;
     int upgradeAttempts = 0;
@@ -4134,7 +4137,9 @@ static void UpdateInternal()
                 rig.points = Skeleton::BonePoints{};
                 rig.prevLocalValid = false;
                 rig.smoothedValid = false;
+                rig.worldMatrices.clear();
                 rig.smoothedWorldMatrices.clear();
+                for (auto& history : rig.relWorldHist) history.clear();
                 rig.lastSampledPos = Vector3{};
                 rig.lastMotionTick = 0;
                 rig.animatorActive = true;
@@ -4235,6 +4240,9 @@ static void UpdateInternal()
                 if (ok) {
                     rig.layout = std::move(candidate);
                     rig.layoutValid = true;
+                    // Never reuse matrices from an invalidated hierarchy.
+                    rig.worldMatrices.clear();
+                    rig.smoothedWorldMatrices.clear();
                     rig.poseFailures = 0;
                     rig.poseFailureSince = 0;
                     rig.smoothedValid = false;
@@ -4248,6 +4256,7 @@ static void UpdateInternal()
                         rig.bones.clear();
                         rig.points = Skeleton::BonePoints{};
                         rig.smoothedValid = false;
+                        rig.worldMatrices.clear();
                         rig.smoothedWorldMatrices.clear();
                         rig.poseHistCount = 0;
                         rig.poseHistCursor = 0;
@@ -4892,6 +4901,7 @@ static void UpdateInternal()
                         rig.bones.clear();
                         rig.points = Skeleton::BonePoints{};
                         rig.smoothedValid = false;
+                        rig.worldMatrices.clear();
                         rig.smoothedWorldMatrices.clear();
                         rig.poseHistCount = 0;
                         rig.poseHistCursor = 0;
@@ -4975,7 +4985,9 @@ static void UpdateInternal()
                     }
 
                     if (rig.poseHistCount > 0 &&
-                        rig.relBoneHist[(rig.poseHistCursor + 2) % 3].size() != tmpBones.size())
+                        (rig.relBoneHist[(rig.poseHistCursor + 2) % 3].size() != tmpBones.size() ||
+                         (needChamsMatrices &&
+                          rig.relWorldHist[(rig.poseHistCursor + 2) % 3].size() != tmpWorld.size())))
                     {
                         rig.poseHistCount = 0;
                         rig.poseHistCursor = 0;
@@ -5010,6 +5022,28 @@ static void UpdateInternal()
                     relPts.rightHip      = subVec(tmpPoints.rightHip);
                     relPts.rightKnee     = subVec(tmpPoints.rightKnee);
                     relPts.rightFoot     = subVec(tmpPoints.rightFoot);
+
+                    auto& relWorld = rig.relWorldHist[slot];
+                    if (needChamsMatrices) {
+                        relWorld.resize(tmpWorld.size());
+                        for (std::size_t i = 0; i < tmpWorld.size(); ++i) {
+                            const auto& m = tmpWorld[i].matrix;
+                            if (!std::isfinite(m[3][3]) || std::abs(m[3][3] - 1.f) > 1e-4f ||
+                                !std::isfinite(m[3][0]) || !std::isfinite(m[3][1]) ||
+                                !std::isfinite(m[3][2])) {
+                                const float nan = std::numeric_limits<float>::quiet_NaN();
+                                relWorld[i] = {nan, nan, nan};
+                                continue;
+                            }
+                            relWorld[i] = {
+                                m[3][0] - rawAnchor.x,
+                                m[3][1] - rawAnchor.y,
+                                m[3][2] - rawAnchor.z
+                            };
+                        }
+                    } else {
+                        relWorld.clear();
+                    }
 
                     rig.poseHistCursor = (slot + 1) % 3;
                     if (rig.poseHistCount < 3) ++rig.poseHistCount;
@@ -5051,6 +5085,28 @@ static void UpdateInternal()
                         tmpPoints.rightHip      = med3v(p0.rightHip, p1.rightHip, p2.rightHip);
                         tmpPoints.rightKnee     = med3v(p0.rightKnee, p1.rightKnee, p2.rightKnee);
                         tmpPoints.rightFoot     = med3v(p0.rightFoot, p1.rightFoot, p2.rightFoot);
+
+                        // Match mesh translations to the same samples and filtered
+                        // anchor as the skeleton points; keep latest bone rotations.
+                        if (needChamsMatrices &&
+                            rig.relWorldHist[0].size() == tmpWorld.size() &&
+                            rig.relWorldHist[1].size() == tmpWorld.size() &&
+                            rig.relWorldHist[2].size() == tmpWorld.size()) {
+                            for (std::size_t i = 0; i < tmpWorld.size(); ++i) {
+                                auto& m = tmpWorld[i].matrix;
+                                const auto& a = rig.relWorldHist[0][i];
+                                const auto& b = rig.relWorldHist[1][i];
+                                const auto& c = rig.relWorldHist[2][i];
+                                if (!std::isfinite(m[3][3]) || std::abs(m[3][3] - 1.f) > 1e-4f ||
+                                    !std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z) ||
+                                    !std::isfinite(b.x) || !std::isfinite(b.y) || !std::isfinite(b.z) ||
+                                    !std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z))
+                                    continue;
+                                m[3][0] = anchor.x + med3f(a.x, b.x, c.x);
+                                m[3][1] = anchor.y + med3f(a.y, b.y, c.y);
+                                m[3][2] = anchor.z + med3f(a.z, b.z, c.z);
+                            }
+                        }
                     }
 
                     // Commit every pass so world position stays at full worker rate.
@@ -5186,6 +5242,14 @@ static void UpdateInternal()
                             for (std::size_t i = 0; i < rig.worldMatrices.size(); ++i) {
                                 auto& sm = rig.smoothedWorldMatrices[i];
                                 const auto& rm = rig.worldMatrices[i];
+                                const bool currentValid = std::isfinite(rm.matrix[3][3]) &&
+                                    std::abs(rm.matrix[3][3] - 1.f) < 1e-4f;
+                                const bool previousValid = std::isfinite(sm.matrix[3][3]) &&
+                                    std::abs(sm.matrix[3][3] - 1.f) < 1e-4f;
+                                if (!currentValid || !previousValid) {
+                                    sm = rm;
+                                    continue;
+                                }
                                 const float dx = rm.matrix[3][0]-sm.matrix[3][0];
                                 const float dy = rm.matrix[3][1]-sm.matrix[3][1];
                                 const float dz = rm.matrix[3][2]-sm.matrix[3][2];
