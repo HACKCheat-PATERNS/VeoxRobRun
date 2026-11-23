@@ -444,6 +444,7 @@ struct RigCacheEntry {
     int diagPoseStatus = -1;
     std::uint64_t diagLastPoseLogMs = 0;
     std::uint64_t diagLastUpgradeLogMs = 0;
+    bool diagFullLayoutLogged = false;
     // Vehicle anti-rubber-band anchor filter: suppresses single-frame backward
     // FixedUpdate vs LateUpdate jumps on moving car skeletons while keeping
     // 0 ms lag on forward motion.
@@ -4138,6 +4139,45 @@ static void UpdateInternal()
         // of spawns or refreshes can never stall the worker thread.
         // ---------------------------------------------------------------
         const std::uint64_t now = GetTickCount64();
+        auto logRigCountProbe = [&](const char* event, std::int32_t id,
+                                    const Skeleton::RigLayout& layout) {
+            const auto& p = layout.probe;
+            std::int32_t live38 = 0;
+            std::int32_t live10 = 0;
+            std::uint64_t liveHierarchy = 0;
+            std::uint64_t liveMatrices = 0;
+            std::uint64_t liveParents = 0;
+            std::uint64_t liveTransforms = 0;
+            const bool hierarchyOk = layout.nativeTransform > 0x10000 &&
+                DmaReadFresh(layout.nativeTransform + 0x28, &liveHierarchy, sizeof(liveHierarchy));
+            const bool matricesOk = layout.hierarchy > 0x10000 &&
+                DmaReadFresh(layout.hierarchy + 0x18, &liveMatrices, sizeof(liveMatrices));
+            const bool parentsOk = layout.hierarchy > 0x10000 &&
+                DmaReadFresh(layout.hierarchy + 0x20, &liveParents, sizeof(liveParents));
+            const bool transformsOk = layout.hierarchy > 0x10000 &&
+                DmaReadFresh(layout.hierarchy + 0x30, &liveTransforms, sizeof(liveTransforms));
+            const bool count38Ok = layout.hierarchy > 0x10000 &&
+                DmaReadFresh(layout.hierarchy + 0x38, &live38, sizeof(live38));
+            const bool count10Ok = layout.hierarchy > 0x10000 &&
+                DmaReadFresh(layout.hierarchy + 0x10, &live10, sizeof(live10));
+            DebugLog::Log("RigCountDiag event=%s id=%d source=%u sourceNative=%llx rootNative=%llx hierarchy=%llx matrices=%llx parents=%llx transforms=%llx selectedCount=%d build38=%d/%d build10=%d/%d usedFallback=%d live38=%d/%d live10=%d/%d liveHierarchy=%d/%llx liveMatrices=%d/%llx liveParents=%d/%llx liveTransforms=%d/%llx segments=%zu missing=%03X",
+                event, id, static_cast<unsigned int>(p.source),
+                static_cast<unsigned long long>(p.sourceNative),
+                static_cast<unsigned long long>(layout.nativeTransform),
+                static_cast<unsigned long long>(layout.hierarchy),
+                static_cast<unsigned long long>(layout.matrices),
+                static_cast<unsigned long long>(p.parents),
+                static_cast<unsigned long long>(p.transforms), layout.count,
+                static_cast<int>(p.read38), p.count38,
+                static_cast<int>(p.read10), p.count10, static_cast<int>(p.usedFallback),
+                static_cast<int>(count38Ok), live38,
+                static_cast<int>(count10Ok), live10,
+                static_cast<int>(hierarchyOk), static_cast<unsigned long long>(liveHierarchy),
+                static_cast<int>(matricesOk), static_cast<unsigned long long>(liveMatrices),
+                static_cast<int>(parentsOk), static_cast<unsigned long long>(liveParents),
+                static_cast<int>(transformsOk), static_cast<unsigned long long>(liveTransforms),
+                layout.segments.size(), static_cast<unsigned int>(RigMissingLimbMask(layout)));
+        };
         std::vector<std::size_t> lateResolve;
         int rebuildBudget = fullMapFastMode ? 0 : 1;
 
@@ -4181,6 +4221,7 @@ static void UpdateInternal()
                 rig.poseHistCursor = 0;
                 rig.diagMissingMask = 0xFFFF;
                 rig.diagPoseStatus = -1;
+                rig.diagFullLayoutLogged = false;
             }
 
             // Skeleton layout rebuild is wrapped in try/catch because the
@@ -4231,11 +4272,13 @@ static void UpdateInternal()
             if (rig.layoutValid && now - rig.layoutStamp >= checkIntervalMs) {
                 if (viewPtr <= 0x10000 ||
                     !Skeleton::ValidateHierarchy(rig.layout, DmaRead)) {
-                    if (ConfigInstance.Player.Chams)
+                    if (ConfigInstance.Player.Chams) {
                         DebugLog::Log("RigDiag layout-invalid id=%d view=%llx matrices=%llx count=%d missing=%03X",
                             w.entityId, static_cast<unsigned long long>(viewPtr),
                             static_cast<unsigned long long>(rig.layout.matrices), rig.layout.count,
                             static_cast<unsigned int>(RigMissingLimbMask(rig.layout)));
+                        logRigCountProbe("invalid-old", w.entityId, rig.layout);
+                    }
                     rig.layoutStamp = now;
                     rig.layoutValid = false;
                     rig.layoutStamp = 0;
@@ -4257,6 +4300,10 @@ static void UpdateInternal()
                                 static_cast<unsigned int>(RigMissingLimbMask(candidate)),
                                 rig.layout.segments.size(), candidate.segments.size(),
                                 rig.layout.count, candidate.count);
+                        if (ConfigInstance.Player.Chams)
+                            logRigCountProbe("upgrade", w.entityId, candidate);
+                        if (RigMissingLimbMask(candidate) == 0)
+                            rig.diagFullLayoutLogged = true;
                         rig.diagMissingMask = RigMissingLimbMask(candidate);
                         const bool sameBuf =
                             candidate.matrices == rig.layout.matrices &&
@@ -4274,6 +4321,8 @@ static void UpdateInternal()
                             static_cast<unsigned int>(RigMissingLimbMask(rig.layout)),
                             static_cast<unsigned int>(ok ? RigMissingLimbMask(candidate) : 0xFFFF),
                             limbScore(rig.layout), ok ? limbScore(candidate) : -1, rig.upgradeAttempts);
+                        if (ok)
+                            logRigCountProbe("upgrade-nochange", w.entityId, candidate);
                         rig.diagLastUpgradeLogMs = now;
                     }
                 } else if (!incomplete) {
@@ -4301,6 +4350,12 @@ static void UpdateInternal()
                             static_cast<unsigned int>(missing),
                             static_cast<unsigned int>(rig.diagMissingMask));
                     }
+                    if (ConfigInstance.Player.Chams &&
+                        (missing != 0 || !rig.diagFullLayoutLogged))
+                        logRigCountProbe(missing != 0 ? "built-partial" : "built-full",
+                            w.entityId, candidate);
+                    if (missing == 0)
+                        rig.diagFullLayoutLogged = true;
                     rig.diagMissingMask = missing;
                     rig.layout = std::move(candidate);
                     rig.layoutValid = true;
