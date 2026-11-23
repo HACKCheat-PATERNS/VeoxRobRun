@@ -35,6 +35,18 @@ struct BonePoints {
 
 using ReadFn = std::function<bool(uint64_t, void*, std::size_t)>;
 
+struct RigProbe {
+    std::uint64_t sourceNative = 0;
+    std::uint64_t parents = 0;
+    std::uint64_t transforms = 0;
+    std::int32_t count38 = 0;
+    std::int32_t count10 = 0;
+    std::uint8_t source = 0;
+    bool read38 = false;
+    bool read10 = false;
+    bool usedFallback = false;
+};
+
 // Everything about a rig that stays constant while the character exists:
 // the animation-matrix array, the bone parent table and which bones form the
 // skeleton. Resolving this requires class-name and pointer walks, so it is
@@ -48,6 +60,7 @@ struct RigLayout {
     std::vector<std::uint8_t> selected;
     std::vector<std::pair<std::int32_t, std::int32_t>> segments;
     std::vector<std::int32_t> boneMap;
+    RigProbe probe{};
     std::int32_t head = -1;
     std::int32_t neck = -1;
     std::int32_t chest = -1;
