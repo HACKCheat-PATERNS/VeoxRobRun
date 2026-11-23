@@ -274,6 +274,60 @@ inline void Skin(const Mesh& mesh,
     }
 }
 
+// Count intact triangles before touching the draw list. A single surviving
+// triangle is not a usable character mesh: treating it as success suppresses
+// the full-body capsule fallback when hands, torso or legs have disappeared.
+struct SkinCoverage {
+    std::size_t valid = 0;
+    std::size_t total = 0;
+    std::size_t validByHeight[3]{};
+    std::size_t totalByHeight[3]{};
+
+    bool CompleteEnough() const {
+        if (total == 0 || valid * 100 < total * 93) return false;
+        for (int i = 0; i < 3; ++i) {
+            if (totalByHeight[i] >= 20 &&
+                validByHeight[i] * 100 < totalByHeight[i] * 85)
+                return false;
+        }
+        return true;
+    }
+};
+
+inline SkinCoverage MeasureCoverage(const Mesh& mesh, const Vector3* worldPos)
+{
+    SkinCoverage coverage{};
+    if (!worldPos || mesh.vertices.empty()) return coverage;
+    float low = mesh.vertices[0].y, high = low;
+    for (const auto& v : mesh.vertices) {
+        low = (std::min)(low, v.y);
+        high = (std::max)(high, v.y);
+    }
+    const float invRange = (high - low > 1e-4f) ? (3.f / (high - low)) : 0.f;
+    for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+        const std::uint16_t ia = mesh.indices[t];
+        const std::uint16_t ib = mesh.indices[t + 1];
+        const std::uint16_t ic = mesh.indices[t + 2];
+        // Load() rejects out-of-range indices for every loaded mesh.
+        const float centerY = (mesh.vertices[ia].y +
+                               mesh.vertices[ib].y +
+                               mesh.vertices[ic].y) / 3.f;
+        const int band = (std::max)(0, (std::min)(2,
+            static_cast<int>((centerY - low) * invRange)));
+        ++coverage.total;
+        ++coverage.totalByHeight[band];
+        const auto finite = [](const Vector3& p) {
+            return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+        };
+        if (finite(worldPos[ia]) && finite(worldPos[ib]) &&
+            finite(worldPos[ic])) {
+            ++coverage.valid;
+            ++coverage.validByHeight[band];
+        }
+    }
+    return coverage;
+}
+
 // Project skinned vertices to screen space and draw filled triangles.
 // Returns true if anything was drawn.
 inline bool Draw(ImDrawList* dl,
