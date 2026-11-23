@@ -8,6 +8,7 @@ extern void RequestReattach();
 #include "CameraFinder.h"
 #include "CollisionBVH.h"
 #include "ConfigInstance.h"
+#include "RigidMatrixBlend.h"
 #include "DebugLog.h"
 #include "Overlay.h"
 #include <atomic>
@@ -5257,11 +5258,9 @@ static void UpdateInternal()
                                     sm = rm;
                                     continue;
                                 }
-                                for (int r = 0; r < 4; ++r) {
-                                    for (int c = 0; c < 4; ++c) {
-                                        sm.matrix[r][c] = sm.matrix[r][c] * inv + rm.matrix[r][c] * alpha;
-                                    }
-                                }
+                                // Element-wise rotation matrix LERP produces
+                                // non-orthogonal transforms and stretches arms.
+                                sm = RigidMatrixBlend::Blend(sm, rm, alpha);
                             }
                         }
                     } else {
