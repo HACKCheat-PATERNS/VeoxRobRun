@@ -43,7 +43,10 @@ int SelectCoherentFrame(const std::vector<Segment> (&frames)[3], int newest)
     int chosen = newest;
     double best = distance[newest][(newest + 1) % 3] +
                   distance[newest][(newest + 2) % 3];
-    for (int i = 0; i < 3; ++i) {
+    // Search most recent to oldest so equivalent stable samples prefer
+    // the freshest available pose instead of an arbitrary ring slot.
+    for (int age = 0; age < 3; ++age) {
+        const int i = (newest + 3 - age) % 3;
         const double score = distance[i][(i + 1) % 3] +
                              distance[i][(i + 2) % 3];
         if (score + 1e-8 < best) {
