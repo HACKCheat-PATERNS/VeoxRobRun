@@ -57,4 +57,25 @@ int SelectCoherentFrame(const std::vector<Segment> (&frames)[3], int newest)
     return chosen;
 }
 
+// A limb must never snap independently of its parent or torso.
+// This check is shared by the worker and its offline regression tests.
+template <typename Segment>
+bool HasLargeJointDelta(const std::vector<Segment>& previous,
+                        const std::vector<Segment>& current,
+                        float maxDeltaSq)
+{
+    if (previous.size() != current.size()) return true;
+    auto large = [maxDeltaSq](const auto& a, const auto& b) {
+        const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        const float distanceSq = dx*dx + dy*dy + dz*dz;
+        return !std::isfinite(distanceSq) || distanceSq > maxDeltaSq;
+    };
+    for (std::size_t i = 0; i < current.size(); ++i) {
+        if (large(previous[i].a, current[i].a) ||
+            large(previous[i].b, current[i].b))
+            return true;
+    }
+    return false;
+}
+
 } // namespace PoseFrameSelector
