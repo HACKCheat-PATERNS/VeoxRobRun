@@ -1278,9 +1278,6 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
         for (int b = 0; b < count; ++b) {
             auto& mat = worldMatricesOut[b];
             if (!worldValid[b]) {
-                // Keep failed bones distinguishable from a real identity
-                // transform. CharacterMesh::Skin must never skin against an
-                // invalid matrix (it would displace weighted vertices).
                 std::memset(&mat, 0, sizeof(Matrix4x4));
                 continue;
             }
