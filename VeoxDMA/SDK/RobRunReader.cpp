@@ -5178,8 +5178,46 @@ static void UpdateInternal()
                     // so snap directly without adding PoseSmoothing lag/toggle chatter.
                     const float moveDist = Distance(rig.lastSampledPos, entity.position);
                     rig.lastSampledPos = entity.position;
-                    const bool snapPose = entity.inVehicle || (moveDist > 0.40f);
+                    bool snapPose = entity.inVehicle || (moveDist > 0.40f);
                     const float maxDeltaSq = 0.25f;
+                    if (!snapPose && ConfigInstance.Player.PoseSmoothing &&
+                        rig.smoothedValid && rig.smoothedBones.size() == rig.bones.size()) {
+                        // A large joint displacement is a WHOLE-pose transition.
+                        // Snapping one arm while smoothing the torso independently
+                        // breaks the hierarchy and causes visible limb/body jumps.
+                        for (std::size_t i = 0; i < rig.bones.size(); ++i) {
+                            const auto& old = rig.smoothedBones[i];
+                            const auto& cur = rig.bones[i];
+                            const float dax = cur.a.x - old.a.x;
+                            const float day = cur.a.y - old.a.y;
+                            const float daz = cur.a.z - old.a.z;
+                            const float dbx = cur.b.x - old.b.x;
+                            const float dby = cur.b.y - old.b.y;
+                            const float dbz = cur.b.z - old.b.z;
+                            if (dax*dax + day*day + daz*daz > maxDeltaSq ||
+                                dbx*dbx + dby*dby + dbz*dbz > maxDeltaSq) {
+                                snapPose = true;
+                                break;
+                            }
+                        }
+                        if (!snapPose && needChamsMatrices &&
+                            rig.smoothedWorldMatrices.size() == rig.worldMatrices.size()) {
+                            for (std::size_t i = 0; i < rig.worldMatrices.size(); ++i) {
+                                const auto& cur = rig.worldMatrices[i].matrix;
+                                const auto& old = rig.smoothedWorldMatrices[i].matrix;
+                                if (std::abs(cur[3][3] - 1.f) > 1e-4f ||
+                                    std::abs(old[3][3] - 1.f) > 1e-4f)
+                                    continue; // intentionally unavailable bones
+                                const float dx = cur[3][0] - old[3][0];
+                                const float dy = cur[3][1] - old[3][1];
+                                const float dz = cur[3][2] - old[3][2];
+                                if (dx*dx + dy*dy + dz*dz > maxDeltaSq) {
+                                    snapPose = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
 
                     // Exponential smoothing on the worker. PoseSmoothAlpha is
                     // the base weight of the new sample: 1 publishes the raw pose,
@@ -5194,15 +5232,6 @@ static void UpdateInternal()
                         for (std::size_t i = 0; i < rig.bones.size(); ++i) {
                             auto& s = rig.smoothedBones[i];
                             const auto& r = rig.bones[i];
-                            const float dax = r.a.x-s.a.x, day = r.a.y-s.a.y, daz = r.a.z-s.a.z;
-                            const float dbx = r.b.x-s.b.x, dby = r.b.y-s.b.y, dbz = r.b.z-s.b.z;
-                            if (dax*dax+day*day+daz*daz > maxDeltaSq ||
-                                dbx*dbx+dby*dby+dbz*dbz > maxDeltaSq) {
-                                s.a = r.a;
-                                s.b = r.b;
-                                s.visible = r.visible;
-                                continue;
-                            }
                             s.a.x = s.a.x * inv + r.a.x * alpha;
                             s.a.y = s.a.y * inv + r.a.y * alpha;
                             s.a.z = s.a.z * inv + r.a.z * alpha;
@@ -5212,11 +5241,6 @@ static void UpdateInternal()
                             s.visible = r.visible;
                         }
                         auto lerpVec = [&](Skeleton::Vec& dst, const Skeleton::Vec& src) {
-                            const float dx = src.x-dst.x, dy = src.y-dst.y, dz = src.z-dst.z;
-                            if (dx*dx+dy*dy+dz*dz > 0.25f) {
-                                dst = src;
-                                return;
-                            }
                             dst.x = dst.x * inv + src.x * alpha;
                             dst.y = dst.y * inv + src.y * alpha;
                             dst.z = dst.z * inv + src.z * alpha;
@@ -5252,13 +5276,6 @@ static void UpdateInternal()
                                 const bool previousValid = std::isfinite(sm.matrix[3][3]) &&
                                     std::abs(sm.matrix[3][3] - 1.f) < 1e-4f;
                                 if (!currentValid || !previousValid) {
-                                    sm = rm;
-                                    continue;
-                                }
-                                const float dx = rm.matrix[3][0]-sm.matrix[3][0];
-                                const float dy = rm.matrix[3][1]-sm.matrix[3][1];
-                                const float dz = rm.matrix[3][2]-sm.matrix[3][2];
-                                if (dx*dx+dy*dy+dz*dz > 0.25f) {
                                     sm = rm;
                                     continue;
                                 }
