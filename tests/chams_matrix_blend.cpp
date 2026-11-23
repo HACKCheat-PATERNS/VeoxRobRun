@@ -1,5 +1,3 @@
-// Standalone portable regression for rigid pose blending.
-// c++ -std=c++17 tests/chams_matrix_blend.cpp -o chams_matrix_blend
 #include "../VeoxDMA/SDK/RigidMatrixBlend.h"
 #include <cassert>
 #include <cmath>
@@ -30,11 +28,9 @@ int main() {
     assert(Near(mid.matrix[1][0], -s));
     assert(Near(mid.matrix[1][1], s));
     assert(Near(mid.matrix[3][0], 3.f));
-    // The interpolated rotation remains orthonormal, unlike element-wise LERP.
     const float len = mid.matrix[0][0]*mid.matrix[0][0] +
                       mid.matrix[0][1]*mid.matrix[0][1];
     assert(Near(len, 1.f));
-    // No extrapolation and an invalid previous pose does not contaminate output.
     const auto atEnd = RigidMatrixBlend::Blend(old, current, 1.f);
     assert(Near(atEnd.matrix[0][0], current.matrix[0][0]));
     const auto atStart = RigidMatrixBlend::Blend(old, current, 0.f);
