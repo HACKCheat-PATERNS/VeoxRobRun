@@ -434,7 +434,6 @@ struct RigCacheEntry {
     // 1-frame pre-LateUpdate / torn-DMA flickers of any amplitude.
     std::vector<Skeleton::BoneSegment> relBoneHist[3];
     Skeleton::BonePoints relPtsHist[3]{};
-    // All three representations must come from the SAME sampled frame.
     std::vector<Skeleton::Vec> relWorldHist[3];
     std::vector<Matrix4x4> worldFrameHist[3];
     int poseHistCount = 0;
@@ -3849,8 +3848,6 @@ static void UpdateInternal()
             bool needsPose = false;
             std::size_t poseOffset = 0;
             std::size_t poseSize = 0;
-            // VMMDLL reports bytes per individual pose request. The scatter
-            // call's aggregate return does not prove every pose was read.
             DWORD poseBytesRead = 0;
         };
 
@@ -4250,7 +4247,6 @@ static void UpdateInternal()
                 if (ok) {
                     rig.layout = std::move(candidate);
                     rig.layoutValid = true;
-                    // Never reuse matrices from an invalidated hierarchy.
                     rig.worldMatrices.clear();
                     rig.smoothedWorldMatrices.clear();
                     rig.poseFailures = 0;
@@ -4856,10 +4852,6 @@ static void UpdateInternal()
                     tmpWorld.resize(static_cast<std::size_t>(rig.layout.count));
 
                 Skeleton::PoseStats pst{};
-                // Never process a partially-read scatter buffer. Unread pages
-                // are zero-filled and can otherwise yield a seemingly valid
-                // skeleton with missing mesh-only bones. A short result uses
-                // the existing fresh-read recovery path below.
                 const bool poseFullyRead = w.poseSize > 0 &&
                     w.poseSize == static_cast<std::size_t>(w.poseBytesRead);
                 bool sampled = poseFullyRead &&
@@ -5072,11 +5064,6 @@ static void UpdateInternal()
                     if (rig.poseHistCount < 3) ++rig.poseHistCount;
 
                     if (rig.poseHistCount == 3) {
-                        // Coordinate-wise median is not a valid skeleton pose:
-                        // it combines different times, and pairing its translations
-                        // with the newest quaternions detaches arms and torso.
-                        // Select one real pose (medoid) and move its entire rig
-                        // to the freshest world anchor instead.
                         const int chosen = PoseFrameSelector::SelectCoherentFrame(
                             rig.relBoneHist, slot);
                         auto restore = [&](const Skeleton::Vec& relative) -> Skeleton::Vec {
@@ -5111,8 +5098,6 @@ static void UpdateInternal()
                         if (needChamsMatrices &&
                             rig.relWorldHist[chosen].size() == tmpWorld.size() &&
                             rig.worldFrameHist[chosen].size() == tmpWorld.size()) {
-                            // Rotations AND local offsets are from the selected
-                            // sample. Only the common world anchor is refreshed.
                             tmpWorld = rig.worldFrameHist[chosen];
                             for (std::size_t i = 0; i < tmpWorld.size(); ++i) {
                                 auto& m = tmpWorld[i].matrix;
@@ -5198,8 +5183,6 @@ static void UpdateInternal()
                     const float maxDeltaSq = 0.25f;
                     if (!snapPose && ConfigInstance.Player.PoseSmoothing &&
                         rig.smoothedValid && rig.smoothedBones.size() == rig.bones.size()) {
-                        // A single limb jump snaps the entire coherent pose,
-                        // not that limb alone.
                         snapPose = PoseFrameSelector::HasLargeJointDelta(
                             rig.smoothedBones, rig.bones, maxDeltaSq);
                         if (!snapPose && needChamsMatrices &&
@@ -5209,7 +5192,7 @@ static void UpdateInternal()
                                 const auto& old = rig.smoothedWorldMatrices[i].matrix;
                                 if (std::abs(cur[3][3] - 1.f) > 1e-4f ||
                                     std::abs(old[3][3] - 1.f) > 1e-4f)
-                                    continue; // intentionally unavailable bones
+                                    continue;
                                 const float dx = cur[3][0] - old[3][0];
                                 const float dy = cur[3][1] - old[3][1];
                                 const float dz = cur[3][2] - old[3][2];
@@ -5281,8 +5264,6 @@ static void UpdateInternal()
                                     sm = rm;
                                     continue;
                                 }
-                                // Element-wise rotation matrix LERP produces
-                                // non-orthogonal transforms and stretches arms.
                                 sm = RigidMatrixBlend::Blend(sm, rm, alpha);
                             }
                         }
