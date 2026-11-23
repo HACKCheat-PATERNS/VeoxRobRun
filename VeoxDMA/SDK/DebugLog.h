@@ -3,6 +3,7 @@
 #include <cstdarg>
 #include <ctime>
 #include <mutex>
+#include <string>
 #include <windows.h>
 
 namespace DebugLog {
@@ -12,10 +13,22 @@ inline std::mutex& Mutex() { static std::mutex m; return m; }
 inline FILE* Open() {
     static FILE* f = nullptr;
     if (f) return f;
-    CreateDirectoryA("C:\\VeoxDma", nullptr);
-    CreateDirectoryA("C:\\VeoxDma\\robrun", nullptr);
-    CreateDirectoryA("C:\\VeoxDma\\robrun\\debug", nullptr);
-    f = fopen("C:\\VeoxDma\\robrun\\debug\\debug.log", "a");
+    std::wstring exePath(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD length = GetModuleFileNameW(nullptr, exePath.data(), static_cast<DWORD>(exePath.size()));
+        if (length == 0) return nullptr;
+        if (length < exePath.size()) {
+            exePath.resize(length);
+            break;
+        }
+        if (exePath.size() >= 32768) return nullptr;
+        exePath.resize(exePath.size() * 2);
+    }
+    const auto sep = exePath.find_last_of(L"\\/");
+    if (sep == std::wstring::npos) return nullptr;
+    exePath.resize(sep + 1);
+    exePath += L"debug.log";
+    f = _wfopen(exePath.c_str(), L"a");
     if (f) {
         fprintf(f, "\n=== SESSION START (pid %lu) ===\n", GetCurrentProcessId());
         fflush(f);
