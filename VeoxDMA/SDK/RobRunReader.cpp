@@ -440,6 +440,10 @@ struct RigCacheEntry {
     int poseHistCount = 0;
     int poseHistCursor = 0;
     int upgradeAttempts = 0;
+    std::uint16_t diagMissingMask = 0xFFFF;
+    int diagPoseStatus = -1;
+    std::uint64_t diagLastPoseLogMs = 0;
+    std::uint64_t diagLastUpgradeLogMs = 0;
     // Vehicle anti-rubber-band anchor filter: suppresses single-frame backward
     // FixedUpdate vs LateUpdate jumps on moving car skeletons while keeping
     // 0 ms lag on forward motion.
@@ -449,6 +453,23 @@ struct RigCacheEntry {
     bool vehAnchorValid = false;
     int vehBackRejects = 0;
 };
+static std::uint16_t RigMissingLimbMask(const Skeleton::RigLayout& l)
+{
+    std::uint16_t mask = 0;
+    if (l.leftShoulder < 0) mask |= 1u << 0;
+    if (l.leftElbow < 0) mask |= 1u << 1;
+    if (l.leftHand < 0) mask |= 1u << 2;
+    if (l.rightShoulder < 0) mask |= 1u << 3;
+    if (l.rightElbow < 0) mask |= 1u << 4;
+    if (l.rightHand < 0) mask |= 1u << 5;
+    if (l.leftHip < 0) mask |= 1u << 6;
+    if (l.leftKnee < 0) mask |= 1u << 7;
+    if (l.leftFoot < 0) mask |= 1u << 8;
+    if (l.rightHip < 0) mask |= 1u << 9;
+    if (l.rightKnee < 0) mask |= 1u << 10;
+    if (l.rightFoot < 0) mask |= 1u << 11;
+    return mask;
+}
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
 struct RectTransformCache {
@@ -4136,6 +4157,11 @@ static void UpdateInternal()
 
             auto& rig = rigCache[w.entityId];
             if (rig.view != viewPtr) {
+                if (ConfigInstance.Player.Chams && rig.view != 0)
+                    DebugLog::Log("RigDiag view-change id=%d old=%llx new=%llx layoutValid=%d missing=%03X",
+                        w.entityId, static_cast<unsigned long long>(rig.view),
+                        static_cast<unsigned long long>(viewPtr), static_cast<int>(rig.layoutValid),
+                        static_cast<unsigned int>(RigMissingLimbMask(rig.layout)));
                 rig.view = viewPtr;
                 rig.layoutValid = false;
                 rig.layoutStamp = 0;
@@ -4153,6 +4179,8 @@ static void UpdateInternal()
                 rig.animatorActive = true;
                 rig.poseHistCount = 0;
                 rig.poseHistCursor = 0;
+                rig.diagMissingMask = 0xFFFF;
+                rig.diagPoseStatus = -1;
             }
 
             // Skeleton layout rebuild is wrapped in try/catch because the
@@ -4203,6 +4231,11 @@ static void UpdateInternal()
             if (rig.layoutValid && now - rig.layoutStamp >= checkIntervalMs) {
                 if (viewPtr <= 0x10000 ||
                     !Skeleton::ValidateHierarchy(rig.layout, DmaRead)) {
+                    if (ConfigInstance.Player.Chams)
+                        DebugLog::Log("RigDiag layout-invalid id=%d view=%llx matrices=%llx count=%d missing=%03X",
+                            w.entityId, static_cast<unsigned long long>(viewPtr),
+                            static_cast<unsigned long long>(rig.layout.matrices), rig.layout.count,
+                            static_cast<unsigned int>(RigMissingLimbMask(rig.layout)));
                     rig.layoutStamp = now;
                     rig.layoutValid = false;
                     rig.layoutStamp = 0;
@@ -4218,6 +4251,13 @@ static void UpdateInternal()
                     const bool ok = buildBestLayout(DmaRead, candidate);
                     SwitchToThread();
                     if (ok && limbScore(candidate) > limbScore(rig.layout)) {
+                        if (ConfigInstance.Player.Chams)
+                            DebugLog::Log("RigDiag layout-upgrade id=%d oldMissing=%03X newMissing=%03X oldSegments=%zu newSegments=%zu oldCount=%d newCount=%d",
+                                w.entityId, static_cast<unsigned int>(RigMissingLimbMask(rig.layout)),
+                                static_cast<unsigned int>(RigMissingLimbMask(candidate)),
+                                rig.layout.segments.size(), candidate.segments.size(),
+                                rig.layout.count, candidate.count);
+                        rig.diagMissingMask = RigMissingLimbMask(candidate);
                         const bool sameBuf =
                             candidate.matrices == rig.layout.matrices &&
                             candidate.count == rig.layout.count;
@@ -4228,6 +4268,13 @@ static void UpdateInternal()
                         if (!layoutMissingLimbs(rig.layout))
                             rig.upgradeAttempts = 0;
                         if (!sameBuf) w.needsPose = false;
+                    } else if (ConfigInstance.Player.Chams && now - rig.diagLastUpgradeLogMs >= 10000) {
+                        DebugLog::Log("RigDiag layout-upgrade-nochange id=%d candidateOk=%d missing=%03X candidateMissing=%03X score=%d candidateScore=%d attempts=%d",
+                            w.entityId, static_cast<int>(ok),
+                            static_cast<unsigned int>(RigMissingLimbMask(rig.layout)),
+                            static_cast<unsigned int>(ok ? RigMissingLimbMask(candidate) : 0xFFFF),
+                            limbScore(rig.layout), ok ? limbScore(candidate) : -1, rig.upgradeAttempts);
+                        rig.diagLastUpgradeLogMs = now;
                     }
                 } else if (!incomplete) {
                     rig.layoutStamp = now;
@@ -4244,6 +4291,17 @@ static void UpdateInternal()
                 const bool ok = buildBestLayout(DmaRead, candidate);
                 SwitchToThread();
                 if (ok) {
+                    const std::uint16_t missing = RigMissingLimbMask(candidate);
+                    if (ConfigInstance.Player.Chams &&
+                        (missing != 0 || (rig.diagMissingMask != 0xFFFF && rig.diagMissingMask != missing))) {
+                        DebugLog::Log("RigDiag layout-built id=%d view=%llx matrices=%llx count=%d segments=%zu missing=%03X previous=%03X",
+                            w.entityId, static_cast<unsigned long long>(viewPtr),
+                            static_cast<unsigned long long>(candidate.matrices),
+                            candidate.count, candidate.segments.size(),
+                            static_cast<unsigned int>(missing),
+                            static_cast<unsigned int>(rig.diagMissingMask));
+                    }
+                    rig.diagMissingMask = missing;
                     rig.layout = std::move(candidate);
                     rig.layoutValid = true;
                     rig.worldMatrices.clear();
@@ -4255,6 +4313,12 @@ static void UpdateInternal()
                     rig.poseHistCursor = 0;
                     rig.upgradeAttempts = 0;
                 } else {
+                    if (ConfigInstance.Player.Chams && now - rig.diagLastUpgradeLogMs >= 10000) {
+                        DebugLog::Log("RigDiag layout-build-failed id=%d view=%llx previousMissing=%03X",
+                            w.entityId, static_cast<unsigned long long>(viewPtr),
+                            static_cast<unsigned int>(rig.diagMissingMask));
+                        rig.diagLastUpgradeLogMs = now;
+                    }
                     if (rig.poseFailureSince == 0)
                         rig.poseFailureSince = now;
                     if (now - rig.poseFailureSince >= 2500) {
@@ -4859,6 +4923,8 @@ static void UpdateInternal()
                         tmpBones, &tmpPoints, tmpLocal.data(),
                         needChamsMatrices ? tmpWorld.data() : nullptr, &pst);
 
+                const bool scatterSampled = sampled;
+                const Skeleton::PoseStats scatterStats = pst;
                 if (sampled) {
                     ++poseScatterOkAcc;
                 } else {
@@ -4887,14 +4953,36 @@ static void UpdateInternal()
 
                 // Reject single-frame torn DMA poses inside moving vehicles (head-to-pelvis
                 // stretches past 1.25 m when scatter reads split across two car frames).
+                bool vehiclePoseRejected = false;
                 if (sampled && entity.inVehicle && tmpPoints.hasPelvis && tmpPoints.hasHead) {
                     const float hdx = tmpPoints.head.x - tmpPoints.pelvis.x;
                     const float hdy = tmpPoints.head.y - tmpPoints.pelvis.y;
                     const float hdz = tmpPoints.head.z - tmpPoints.pelvis.z;
-                    if (hdx * hdx + hdy * hdy + hdz * hdz > 1.25f * 1.25f)
+                    if (hdx * hdx + hdy * hdy + hdz * hdz > 1.25f * 1.25f) {
                         sampled = false;
+                        vehiclePoseRejected = true;
+                    }
                 }
 
+                if (ConfigInstance.Player.Chams) {
+                    const int poseState = vehiclePoseRejected ? 5 :
+                        !sampled ? (poseFullyRead ? 4 : 3) :
+                        !poseFullyRead ? 1 : !scatterSampled ? 2 : 0;
+                    if (poseState != rig.diagPoseStatus ||
+                        (poseState != 0 && now - rig.diagLastPoseLogMs >= 5000)) {
+                        if (poseState != 0 || rig.diagPoseStatus > 0)
+                            DebugLog::Log("RigDiag pose id=%d status=%d prev=%d bytes=%lu/%zu scatterInvalid=%d scatterChainDrop=%d freshInvalid=%d freshChainDrop=%d segments=%zu/%zu layoutMissing=%03X failures=%d",
+                                w.entityId, poseState, rig.diagPoseStatus,
+                                static_cast<unsigned long>(w.poseBytesRead), w.poseSize,
+                                scatterStats.invalid, scatterStats.chainDrop,
+                                pst.invalid, pst.chainDrop, tmpBones.size(),
+                                rig.layout.segments.size(),
+                                static_cast<unsigned int>(RigMissingLimbMask(rig.layout)),
+                                rig.poseFailures);
+                        rig.diagLastPoseLogMs = now;
+                    }
+                    rig.diagPoseStatus = poseState;
+                }
                 if (!sampled) {
                     if (rig.poseFailures == 0)
                         rig.poseFailureSince = now;
