@@ -4205,13 +4205,13 @@ static void UpdateInternal()
                 static_cast<unsigned int>(RigMissingLimbMask(layout)));
 
             bool productionSampled = false;
+            std::vector<Matrix4x4> primaryMatrices;
             std::vector<float> differences;
             if (altSampled && alternative.hierarchy == layout.hierarchy &&
                 alternative.matrices == layout.matrices &&
                 static_cast<int>(alternative.hierarchyCount) == layout.count &&
                 Skeleton::ValidateHierarchy(layout, DmaReadFresh)) {
-                std::vector<Matrix4x4> primaryMatrices(
-                    static_cast<std::size_t>(layout.count));
+                primaryMatrices.resize(static_cast<std::size_t>(layout.count));
                 std::vector<Skeleton::BoneSegment> primarySegments;
                 productionSampled = Skeleton::SampleLayout(
                     layout, DmaReadFresh, primarySegments, nullptr,
@@ -4244,6 +4244,30 @@ static void UpdateInternal()
                 differences.size(), maxDelta, p95Delta,
                 static_cast<int>(alternative.hierarchy != 0 &&
                                  alternative.hierarchy == layout.hierarchy));
+            // Four index-spread bone samples per diagnostic event, so the log
+            // carries actual positions, not only counts and aggregate errors.
+            if (altSampled) {
+                const auto& pts = alternative.worldPoints;
+                const std::size_t samples = (std::min)(std::size_t{4}, pts.size());
+                for (std::size_t sample = 0; sample < samples; ++sample) {
+                    const std::size_t which = samples > 1
+                        ? sample * (pts.size() - 1) / (samples - 1) : 0;
+                    const auto& bone = pts[which];
+                    const std::size_t idx = static_cast<std::size_t>(bone.first);
+                    const bool primaryValid = productionSampled &&
+                        idx < primaryMatrices.size() &&
+                        primaryMatrices[idx].matrix[3][3] > 0.9f;
+                    const Vec primary = primaryValid ? Vec{
+                        primaryMatrices[idx].matrix[3][0],
+                        primaryMatrices[idx].matrix[3][1],
+                        primaryMatrices[idx].matrix[3][2]} : Vec{};
+                    DebugLog::Log("RigSkinBone event=%s id=%d index=%d primaryValid=%d primary=%.4f/%.4f/%.4f parallel=%.4f/%.4f/%.4f",
+                        event, id, bone.first, static_cast<int>(primaryValid),
+                        primary.x, primary.y, primary.z,
+                        bone.second.x, bone.second.y, bone.second.z);
+                }
+            }
+
 
         };
         std::vector<std::size_t> lateResolve;
