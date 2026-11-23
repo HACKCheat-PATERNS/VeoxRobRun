@@ -3849,6 +3849,9 @@ static void UpdateInternal()
             bool needsPose = false;
             std::size_t poseOffset = 0;
             std::size_t poseSize = 0;
+            // VMMDLL reports bytes per individual pose request. The scatter
+            // call's aggregate return does not prove every pose was read.
+            DWORD poseBytesRead = 0;
         };
 
         // ---------------------------------------------------------------
@@ -4064,9 +4067,12 @@ static void UpdateInternal()
                         w.blockAddress, &w.block, sizeof(TransformBlock));
                     if (w.needsPose) {
                         auto& rig = rigCache[w.entityId];
-                        TargetProcess.AddScatterReadRequest(scatter,
-                            rig.layout.matrices,
-                            poseBuf.data() + w.poseOffset, w.poseSize);
+                        w.poseBytesRead = 0;
+                        VMMDLL_Scatter_PrepareEx(
+                            scatter.handle, rig.layout.matrices,
+                            static_cast<DWORD>(w.poseSize),
+                            reinterpret_cast<PBYTE>(poseBuf.data() + w.poseOffset),
+                            &w.poseBytesRead);
                         ++chunkPoses;
                     }
                     ++chunkEnts;
@@ -4285,10 +4291,13 @@ static void UpdateInternal()
             if (scatter.handle) {
                 for (auto idx : lateResolve) {
                     auto& rig = rigCache[work[idx].entityId];
-                    TargetProcess.AddScatterReadRequest(scatter,
-                        rig.layout.matrices,
-                        poseBuf.data() + work[idx].poseOffset,
-                        work[idx].poseSize);
+                    auto& w = work[idx];
+                    w.poseBytesRead = 0;
+                    VMMDLL_Scatter_PrepareEx(
+                        scatter.handle, rig.layout.matrices,
+                        static_cast<DWORD>(w.poseSize),
+                        reinterpret_cast<PBYTE>(poseBuf.data() + w.poseOffset),
+                        &w.poseBytesRead);
                 }
                 TargetProcess.ExecuteReadScatter(scatter);
             }
@@ -4847,10 +4856,17 @@ static void UpdateInternal()
                     tmpWorld.resize(static_cast<std::size_t>(rig.layout.count));
 
                 Skeleton::PoseStats pst{};
-                bool sampled = Skeleton::ProcessPoseData(rig.layout,
-                    poseBuf.data() + w.poseOffset, w.poseSize,
-                    tmpBones, &tmpPoints, tmpLocal.data(),
-                    needChamsMatrices ? tmpWorld.data() : nullptr, &pst);
+                // Never process a partially-read scatter buffer. Unread pages
+                // are zero-filled and can otherwise yield a seemingly valid
+                // skeleton with missing mesh-only bones. A short result uses
+                // the existing fresh-read recovery path below.
+                const bool poseFullyRead = w.poseSize > 0 &&
+                    w.poseSize == static_cast<std::size_t>(w.poseBytesRead);
+                bool sampled = poseFullyRead &&
+                    Skeleton::ProcessPoseData(rig.layout,
+                        poseBuf.data() + w.poseOffset, w.poseSize,
+                        tmpBones, &tmpPoints, tmpLocal.data(),
+                        needChamsMatrices ? tmpWorld.data() : nullptr, &pst);
 
                 if (sampled) {
                     ++poseScatterOkAcc;
