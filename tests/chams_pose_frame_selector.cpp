@@ -53,5 +53,15 @@ int main() {
 
     frames[1].clear();
     assert(PoseFrameSelector::SelectCoherentFrame(frames, 0) == 0);
-    std::puts("coherent pose selector: OK");
+
+    // Snap decisions apply to an entire pose, not a single arm.
+    std::vector<Segment> previous{Limb(0.f), Limb(0.f)};
+    std::vector<Segment> current{Limb(0.f), Limb(0.6f)};
+    assert(PoseFrameSelector::HasLargeJointDelta(previous, current, 0.25f));
+    current[1] = Limb(0.1f);
+    assert(!PoseFrameSelector::HasLargeJointDelta(previous, current, 0.25f));
+    current.pop_back();
+    assert(PoseFrameSelector::HasLargeJointDelta(previous, current, 0.25f));
+
+    std::puts("coherent pose selector and atomic snap: OK");
 }
