@@ -4140,7 +4140,7 @@ static void UpdateInternal()
         // ---------------------------------------------------------------
         const std::uint64_t now = GetTickCount64();
         auto logRigCountProbe = [&](const char* event, std::int32_t id,
-                                    const Skeleton::RigLayout& layout, std::uintptr_t view, std::uintptr_t characterModel) {
+                                    const Skeleton::RigLayout& layout, std::uintptr_t view) {
             const auto& p = layout.probe;
             std::int32_t live38 = 0;
             std::int32_t live10 = 0;
@@ -4181,61 +4181,6 @@ static void UpdateInternal()
             // This proves whether the managed SkinnedMeshRenderer references stay
             // available when the native TransformHierarchy count collapses.
             // It does NOT provide native bones/rootBone offsets or change pose reads.
-            constexpr std::uint64_t maxAddress = 0x00007FFFFFFFFFFFULL;
-            auto safeAddress = [](std::uint64_t address) {
-                return address > 0x10000 && address < 0x00007FFFFFFFFFFFULL;
-            };
-            auto readPointer = [&](std::uint64_t base, std::uint64_t offset) -> std::uint64_t {
-                std::uint64_t value = 0;
-                if (!safeAddress(base) || base > maxAddress - offset ||
-                    !DmaReadFresh(base + offset, &value, sizeof(value)) || !safeAddress(value))
-                    return 0;
-                return value;
-            };
-            const std::uint64_t customization = readPointer(view, 0xB8);
-            const bool customizationClass = customization != 0 &&
-                RobRunMemory::IsClass(static_cast<std::uintptr_t>(customization), "CharacterCustomizationView");
-            const std::uint64_t lodArray = customizationClass
-                ? readPointer(customization, 0x20) : 0;
-            std::uint64_t lodCount = 0;
-            const bool countOk = lodArray != 0 &&
-                lodArray <= maxAddress - 0x18 &&
-                DmaReadFresh(lodArray + 0x18, &lodCount, sizeof(lodCount));
-            const bool plausibleCount = countOk && lodCount > 0 && lodCount <= 8;
-            DebugLog::Log("RigSkinDiag event=%s id=%d view=%llx customization=%llx classOk=%d lodArray=%llx lodCount=%d/%llu plausible=%d",
-                event, id,
-                static_cast<unsigned long long>(view),
-                static_cast<unsigned long long>(customization),
-                static_cast<int>(customizationClass),
-                static_cast<unsigned long long>(lodArray),
-                static_cast<int>(countOk), static_cast<unsigned long long>(lodCount),
-                static_cast<int>(plausibleCount));
-            if (!plausibleCount)
-                return;
-            for (std::uint64_t i = 0; i < lodCount; ++i) {
-                const std::uint64_t lod = readPointer(lodArray, 0x20 + i * sizeof(std::uint64_t));
-                const std::uint64_t body = readPointer(lod, 0x38);
-                const std::uint64_t head = readPointer(lod, 0x80);
-                const bool bodyClass = body != 0 &&
-                    RobRunMemory::IsClass(static_cast<std::uintptr_t>(body), "SkinnedMeshRenderer");
-                const bool headClass = head != 0 &&
-                    RobRunMemory::IsClass(static_cast<std::uintptr_t>(head), "SkinnedMeshRenderer");
-                const std::uint64_t bodyNative = bodyClass ? readPointer(body, 0x10) : 0;
-                const std::uint64_t headNative = headClass ? readPointer(head, 0x10) : 0;
-                DebugLog::Log("RigSkinLod event=%s id=%d lod=%llu lodObject=%llx body=%llx bodyClass=%d bodyNative=%llx head=%llx headClass=%d headNative=%llx",
-                    event, id, static_cast<unsigned long long>(i),
-                    static_cast<unsigned long long>(lod),
-                    static_cast<unsigned long long>(body), static_cast<int>(bodyClass),
-                    static_cast<unsigned long long>(bodyNative),
-                    static_cast<unsigned long long>(head), static_cast<int>(headClass),
-                    static_cast<unsigned long long>(headNative));
-            }
-            std::uint64_t postCount = 0;
-            const bool stableCount = DmaReadFresh(lodArray + 0x18, &postCount, sizeof(postCount)) &&
-                postCount == lodCount;
-            const bool stableArray = readPointer(customization, 0x20) == lodArray;
-            DebugLog::Log("RigSkinDiagEnd event=%s id=%d stableArray=%d stableCount=%d",
-                event, id, static_cast<int>(stableArray), static_cast<int>(stableCount));
             // Compare an independently resolved renderer bone list against
             // the production layout. This shadow path never publishes to the
             // ESP, aim or Chams components.
@@ -4400,7 +4345,7 @@ static void UpdateInternal()
                             w.entityId, static_cast<unsigned long long>(viewPtr),
                             static_cast<unsigned long long>(rig.layout.matrices), rig.layout.count,
                             static_cast<unsigned int>(RigMissingLimbMask(rig.layout)));
-                        logRigCountProbe("invalid-old", w.entityId, rig.layout, viewPtr, w.characterModel);
+                        logRigCountProbe("invalid-old", w.entityId, rig.layout, viewPtr);
                     }
                     rig.layoutStamp = now;
                     rig.layoutValid = false;
@@ -4424,7 +4369,7 @@ static void UpdateInternal()
                                 rig.layout.segments.size(), candidate.segments.size(),
                                 rig.layout.count, candidate.count);
                         if (ConfigInstance.Player.Chams)
-                            logRigCountProbe("upgrade", w.entityId, candidate, viewPtr, w.characterModel);
+                            logRigCountProbe("upgrade", w.entityId, candidate, viewPtr);
                         if (RigMissingLimbMask(candidate) == 0)
                             rig.diagFullLayoutLogged = true;
                         rig.diagMissingMask = RigMissingLimbMask(candidate);
@@ -4445,7 +4390,7 @@ static void UpdateInternal()
                             static_cast<unsigned int>(ok ? RigMissingLimbMask(candidate) : 0xFFFF),
                             limbScore(rig.layout), ok ? limbScore(candidate) : -1, rig.upgradeAttempts);
                         if (ok)
-                            logRigCountProbe("upgrade-nochange", w.entityId, candidate, viewPtr, w.characterModel);
+                            logRigCountProbe("upgrade-nochange", w.entityId, candidate, viewPtr);
                         rig.diagLastUpgradeLogMs = now;
                     }
                 } else if (!incomplete) {
@@ -4476,7 +4421,7 @@ static void UpdateInternal()
                     if (ConfigInstance.Player.Chams &&
                         (missing != 0 || !rig.diagFullLayoutLogged))
                         logRigCountProbe(missing != 0 ? "built-partial" : "built-full",
-                            w.entityId, candidate, viewPtr, w.characterModel);
+                            w.entityId, candidate, viewPtr);
                     if (missing == 0)
                         rig.diagFullLayoutLogged = true;
                     rig.diagMissingMask = missing;
