@@ -9,6 +9,7 @@ extern void RequestReattach();
 #include "CollisionBVH.h"
 #include "ConfigInstance.h"
 #include "RigidMatrixBlend.h"
+#include "PoseFrameSelector.h"
 #include "DebugLog.h"
 #include "Overlay.h"
 #include <atomic>
@@ -433,8 +434,9 @@ struct RigCacheEntry {
     // 1-frame pre-LateUpdate / torn-DMA flickers of any amplitude.
     std::vector<Skeleton::BoneSegment> relBoneHist[3];
     Skeleton::BonePoints relPtsHist[3]{};
-    // Same pelvis-relative median is used for Chams mesh translations.
+    // All three representations must come from the SAME sampled frame.
     std::vector<Skeleton::Vec> relWorldHist[3];
+    std::vector<Matrix4x4> worldFrameHist[3];
     int poseHistCount = 0;
     int poseHistCursor = 0;
     int upgradeAttempts = 0;
@@ -4141,6 +4143,7 @@ static void UpdateInternal()
                 rig.worldMatrices.clear();
                 rig.smoothedWorldMatrices.clear();
                 for (auto& history : rig.relWorldHist) history.clear();
+                for (auto& history : rig.worldFrameHist) history.clear();
                 rig.lastSampledPos = Vector3{};
                 rig.lastMotionTick = 0;
                 rig.animatorActive = true;
@@ -4988,7 +4991,8 @@ static void UpdateInternal()
                     if (rig.poseHistCount > 0 &&
                         (rig.relBoneHist[(rig.poseHistCursor + 2) % 3].size() != tmpBones.size() ||
                          (needChamsMatrices &&
-                          rig.relWorldHist[(rig.poseHistCursor + 2) % 3].size() != tmpWorld.size())))
+                          (rig.relWorldHist[(rig.poseHistCursor + 2) % 3].size() != tmpWorld.size() ||
+                           rig.worldFrameHist[(rig.poseHistCursor + 2) % 3].size() != tmpWorld.size()))))
                     {
                         rig.poseHistCount = 0;
                         rig.poseHistCursor = 0;
@@ -5026,6 +5030,7 @@ static void UpdateInternal()
 
                     auto& relWorld = rig.relWorldHist[slot];
                     if (needChamsMatrices) {
+                        rig.worldFrameHist[slot] = tmpWorld;
                         relWorld.resize(tmpWorld.size());
                         for (std::size_t i = 0; i < tmpWorld.size(); ++i) {
                             const auto& m = tmpWorld[i].matrix;
@@ -5044,68 +5049,67 @@ static void UpdateInternal()
                         }
                     } else {
                         relWorld.clear();
+                        rig.worldFrameHist[slot].clear();
                     }
 
                     rig.poseHistCursor = (slot + 1) % 3;
                     if (rig.poseHistCount < 3) ++rig.poseHistCount;
 
                     if (rig.poseHistCount == 3) {
-                        auto med3f = [](float a, float b, float c) -> float {
-                            return (std::max)((std::min)(a, b), (std::min)((std::max)(a, b), c));
+                        // Coordinate-wise median is not a valid skeleton pose:
+                        // it combines different times, and pairing its translations
+                        // with the newest quaternions detaches arms and torso.
+                        // Select one real pose (medoid) and move its entire rig
+                        // to the freshest world anchor instead.
+                        const int chosen = PoseFrameSelector::SelectCoherentFrame(
+                            rig.relBoneHist, slot);
+                        auto restore = [&](const Skeleton::Vec& relative) -> Skeleton::Vec {
+                            return {anchor.x + relative.x,
+                                    anchor.y + relative.y,
+                                    anchor.z + relative.z};
                         };
-                        auto med3v = [&](const Skeleton::Vec& v0, const Skeleton::Vec& v1, const Skeleton::Vec& v2) -> Skeleton::Vec {
-                            return {
-                                anchor.x + med3f(v0.x, v1.x, v2.x),
-                                anchor.y + med3f(v0.y, v1.y, v2.y),
-                                anchor.z + med3f(v0.z, v1.z, v2.z)
-                            };
-                        };
-                        const auto& h0 = rig.relBoneHist[0];
-                        const auto& h1 = rig.relBoneHist[1];
-                        const auto& h2 = rig.relBoneHist[2];
+                        const auto& selectedBones = rig.relBoneHist[chosen];
                         for (std::size_t i = 0; i < tmpBones.size(); ++i) {
-                            tmpBones[i].a = med3v(h0[i].a, h1[i].a, h2[i].a);
-                            tmpBones[i].b = med3v(h0[i].b, h1[i].b, h2[i].b);
+                            tmpBones[i].a = restore(selectedBones[i].a);
+                            tmpBones[i].b = restore(selectedBones[i].b);
                         }
-                        const auto& p0 = rig.relPtsHist[0];
-                        const auto& p1 = rig.relPtsHist[1];
-                        const auto& p2 = rig.relPtsHist[2];
-                        tmpPoints.head          = med3v(p0.head, p1.head, p2.head);
-                        tmpPoints.neck          = med3v(p0.neck, p1.neck, p2.neck);
-                        tmpPoints.chest         = med3v(p0.chest, p1.chest, p2.chest);
-                        tmpPoints.pelvis        = med3v(p0.pelvis, p1.pelvis, p2.pelvis);
-                        tmpPoints.leftShoulder  = med3v(p0.leftShoulder, p1.leftShoulder, p2.leftShoulder);
-                        tmpPoints.leftElbow     = med3v(p0.leftElbow, p1.leftElbow, p2.leftElbow);
-                        tmpPoints.leftHand      = med3v(p0.leftHand, p1.leftHand, p2.leftHand);
-                        tmpPoints.rightShoulder = med3v(p0.rightShoulder, p1.rightShoulder, p2.rightShoulder);
-                        tmpPoints.rightElbow    = med3v(p0.rightElbow, p1.rightElbow, p2.rightElbow);
-                        tmpPoints.rightHand     = med3v(p0.rightHand, p1.rightHand, p2.rightHand);
-                        tmpPoints.leftHip       = med3v(p0.leftHip, p1.leftHip, p2.leftHip);
-                        tmpPoints.leftKnee      = med3v(p0.leftKnee, p1.leftKnee, p2.leftKnee);
-                        tmpPoints.leftFoot      = med3v(p0.leftFoot, p1.leftFoot, p2.leftFoot);
-                        tmpPoints.rightHip      = med3v(p0.rightHip, p1.rightHip, p2.rightHip);
-                        tmpPoints.rightKnee     = med3v(p0.rightKnee, p1.rightKnee, p2.rightKnee);
-                        tmpPoints.rightFoot     = med3v(p0.rightFoot, p1.rightFoot, p2.rightFoot);
+                        const auto& selectedPoints = rig.relPtsHist[chosen];
+                        tmpPoints = selectedPoints;
+                        tmpPoints.head = restore(selectedPoints.head);
+                        tmpPoints.neck = restore(selectedPoints.neck);
+                        tmpPoints.chest = restore(selectedPoints.chest);
+                        tmpPoints.pelvis = restore(selectedPoints.pelvis);
+                        tmpPoints.leftShoulder = restore(selectedPoints.leftShoulder);
+                        tmpPoints.leftElbow = restore(selectedPoints.leftElbow);
+                        tmpPoints.leftHand = restore(selectedPoints.leftHand);
+                        tmpPoints.rightShoulder = restore(selectedPoints.rightShoulder);
+                        tmpPoints.rightElbow = restore(selectedPoints.rightElbow);
+                        tmpPoints.rightHand = restore(selectedPoints.rightHand);
+                        tmpPoints.leftHip = restore(selectedPoints.leftHip);
+                        tmpPoints.leftKnee = restore(selectedPoints.leftKnee);
+                        tmpPoints.leftFoot = restore(selectedPoints.leftFoot);
+                        tmpPoints.rightHip = restore(selectedPoints.rightHip);
+                        tmpPoints.rightKnee = restore(selectedPoints.rightKnee);
+                        tmpPoints.rightFoot = restore(selectedPoints.rightFoot);
 
-                        // Match mesh translations to the same samples and filtered
-                        // anchor as the skeleton points; keep latest bone rotations.
                         if (needChamsMatrices &&
-                            rig.relWorldHist[0].size() == tmpWorld.size() &&
-                            rig.relWorldHist[1].size() == tmpWorld.size() &&
-                            rig.relWorldHist[2].size() == tmpWorld.size()) {
+                            rig.relWorldHist[chosen].size() == tmpWorld.size() &&
+                            rig.worldFrameHist[chosen].size() == tmpWorld.size()) {
+                            // Rotations AND local offsets are from the selected
+                            // sample. Only the common world anchor is refreshed.
+                            tmpWorld = rig.worldFrameHist[chosen];
                             for (std::size_t i = 0; i < tmpWorld.size(); ++i) {
                                 auto& m = tmpWorld[i].matrix;
-                                const auto& a = rig.relWorldHist[0][i];
-                                const auto& b = rig.relWorldHist[1][i];
-                                const auto& c = rig.relWorldHist[2][i];
-                                if (!std::isfinite(m[3][3]) || std::abs(m[3][3] - 1.f) > 1e-4f ||
-                                    !std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z) ||
-                                    !std::isfinite(b.x) || !std::isfinite(b.y) || !std::isfinite(b.z) ||
-                                    !std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z))
+                                const auto& rel = rig.relWorldHist[chosen][i];
+                                if (!std::isfinite(m[3][3]) ||
+                                    std::abs(m[3][3] - 1.f) > 1e-4f ||
+                                    !std::isfinite(rel.x) ||
+                                    !std::isfinite(rel.y) ||
+                                    !std::isfinite(rel.z))
                                     continue;
-                                m[3][0] = anchor.x + med3f(a.x, b.x, c.x);
-                                m[3][1] = anchor.y + med3f(a.y, b.y, c.y);
-                                m[3][2] = anchor.z + med3f(a.z, b.z, c.z);
+                                m[3][0] = anchor.x + rel.x;
+                                m[3][1] = anchor.y + rel.y;
+                                m[3][2] = anchor.z + rel.z;
                             }
                         }
                     }
