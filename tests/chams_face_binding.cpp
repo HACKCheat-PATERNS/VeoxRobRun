@@ -1,8 +1,3 @@
-// Regression: the bundled mesh must not be rejected solely because the
-// reader intentionally excludes the fine facial joints from boneMap.
-// Run from repository root:
-//   c++ -std=c++17 tests/chams_face_binding.cpp -o chams_face_binding
-//   ./chams_face_binding
 #include "../VeoxDMA/SDK/ChamsBoneBinding.h"
 #include <array>
 #include <cassert>
