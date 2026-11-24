@@ -2,12 +2,14 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <limits>
 #include <vector>
 #include <string>
 #include <fstream>
 #include <filesystem>
 #include <windows.h>
 #include "Matrix4x4.h"
+#include "ChamsBoneBinding.h"
 #include "DebugLog.h"
 
 namespace CharacterMesh {
@@ -62,6 +64,7 @@ inline std::string ResolvePath(const std::string& requested)
 
 inline bool Load(const std::string& path, Mesh& mesh)
 {
+    mesh.valid = false;
     DLOG("CharacterMesh::Load('%s')", path.c_str());
     std::string resolved;
     try {
@@ -77,20 +80,21 @@ inline bool Load(const std::string& path, Mesh& mesh)
     std::ifstream f(resolved, std::ios::binary);
     if (!f) { DLOG("  FAIL: could not open file"); return false; }
 
-    char magic[4];
-    f.read(magic, 4);
+    char magic[4]{};
+    if (!f.read(magic, sizeof(magic))) return false;
     if (magic[0] != 'C' || magic[1] != 'H' || magic[2] != 'R' || magic[3] != '1') {
         DLOG("  FAIL: bad magic %02x%02x%02x%02x", (unsigned char)magic[0], (unsigned char)magic[1], (unsigned char)magic[2], (unsigned char)magic[3]);
         return false;
     }
 
-    std::uint32_t numBones, numVerts, numTris;
-    f.read(reinterpret_cast<char*>(&numBones), 4);
-    f.read(reinterpret_cast<char*>(&numVerts), 4);
-    f.read(reinterpret_cast<char*>(&numTris), 4);
+    std::uint32_t numBones = 0, numVerts = 0, numTris = 0;
+    if (!f.read(reinterpret_cast<char*>(&numBones), 4) ||
+        !f.read(reinterpret_cast<char*>(&numVerts), 4) ||
+        !f.read(reinterpret_cast<char*>(&numTris), 4))
+        return false;
     DLOG("  header: bones=%u verts=%u tris=%u", numBones, numVerts, numTris);
 
-    if (numBones > 256 || numVerts > 100000 || numTris > 100000) {
+    if (numBones == 0 || numBones > 256 || numVerts > 100000 || numTris > 100000) {
         DLOG("  FAIL: counts out of range");
         return false;
     }
@@ -121,11 +125,21 @@ inline bool Load(const std::string& path, Mesh& mesh)
     // input. Skin() and Draw() use them to index fixed-size arrays; a bone
     // index past numBones or a triangle index past numVerts reads out of
     // bounds on the render thread. Reject the file once, here.
+    for (const auto& matrix : mesh.bindPoses)
+        for (int c = 0; c < 4; ++c)
+            for (int row = 0; row < 4; ++row)
+                if (!std::isfinite(matrix.matrix[c][row]))
+                    return false;
     for (const Vertex& v : mesh.vertices) {
+        if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z))
+            return false;
+        float weightSum = 0.f;
         for (int j = 0; j < 4; ++j) {
-            // Skin() skips zero-weight slots, so only the bones it will
-            // actually dereference have to be in range.
-            if (v.weights[j] <= 1e-6f) continue;
+            const float weight = v.weights[j];
+            if (!std::isfinite(weight) || weight < 0.f)
+                return false;
+            weightSum += weight;
+            if (weight <= 1e-6f) continue;
             if (v.bones[j] >= numBones) {
                 DLOG("  FAIL: bone index %u out of range (%u bones)",
                      (unsigned)v.bones[j], numBones);
@@ -133,6 +147,8 @@ inline bool Load(const std::string& path, Mesh& mesh)
                 return false;
             }
         }
+        if (!std::isfinite(weightSum))
+            return false;
     }
     for (std::uint16_t idx : mesh.indices) {
         if (idx >= numVerts) {
@@ -152,14 +168,13 @@ inline bool Load(const std::string& path, Mesh& mesh)
 // boneWorld:  array of world-space 4x4 matrices, one per skeleton bone
 //             (column-major: matrix[col][row], matching Matrix4x4).
 // boneMap:    meshBoneIndex → skeletonBoneIndex (size = mesh.numBones).
-//             -1 means unmapped (identity fallback).
 // outPos:     output world positions (size = mesh.vertices.size()).
 inline void Skin(const Mesh& mesh,
                  const Matrix4x4* boneWorld, int skeletonBoneCount,
                  const int* boneMap,
                  Vector3* outPos)
 {
-    if (!boneWorld || skeletonBoneCount <= 0 || !outPos)
+    if (!boneWorld || skeletonBoneCount <= 0 || !outPos || mesh.numBones == 0)
         return;
     // Called once per player per frame; reuse scratch instead of allocating
     // two vectors for every entity. numBones is validated at load time.
@@ -173,13 +188,33 @@ inline void Skin(const Mesh& mesh,
     std::uint8_t* mapped = s_mapped.data();
     std::memset(mapped, 0, mesh.numBones);
     for (std::uint32_t b = 0; b < mesh.numBones; ++b) {
-        int skel = boneMap ? boneMap[b] : -1;
+        const auto binding = ChamsBoneBinding::Resolve(b, mesh.numBones, boneMap);
+        const int skel = binding.skeletonBone;
         if (skel < 0 || skel >= skeletonBoneCount) {
             std::memset(&skin[b], 0, sizeof(Matrix4x4));
             continue;
         }
-        skin[b] = mesh.bindPoses[b] * boneWorld[skel];
-        mapped[b] = 1;
+        const auto& world = boneWorld[skel].matrix;
+        bool validWorld = std::abs(world[3][3] - 1.0f) < 1e-4f;
+        for (int c = 0; c < 4 && validWorld; ++c)
+            for (int row = 0; row < 4; ++row)
+                if (!std::isfinite(world[c][row])) {
+                    validWorld = false;
+                    break;
+                }
+        if (!validWorld) {
+            std::memset(&skin[b], 0, sizeof(Matrix4x4));
+            continue;
+        }
+        skin[b] = mesh.bindPoses[binding.bindPoseBone] * boneWorld[skel];
+        bool finiteSkin = true;
+        for (int c = 0; c < 4 && finiteSkin; ++c)
+            for (int row = 0; row < 4; ++row)
+                if (!std::isfinite(skin[b].matrix[c][row])) {
+                    finiteSkin = false;
+                    break;
+                }
+        mapped[b] = finiteSkin ? 1 : 0;
     }
     // reject mis-mapped bones whose skin matrix drifts far from the pack
     {
@@ -211,15 +246,27 @@ inline void Skin(const Mesh& mesh,
     const float rootX = boneWorld[0].matrix[3][0];
     const float rootY = boneWorld[0].matrix[3][1];
     const float rootZ = boneWorld[0].matrix[3][2];
-    const bool checkSpikes = !(rootX == 0.f && rootY == 0.f && rootZ == 0.f);
+    const bool checkSpikes = std::isfinite(rootX) && std::isfinite(rootY) &&
+        std::isfinite(rootZ) && !(rootX == 0.f && rootY == 0.f && rootZ == 0.f);
 
     for (std::size_t v = 0; v < mesh.vertices.size(); ++v) {
         const Vertex& vt = mesh.vertices[v];
-        float mw = 0;
-        for (int j = 0; j < 4; ++j)
-            if (vt.weights[j] > 1e-6f && mapped[vt.bones[j]])
-                mw += vt.weights[j];
-        if (mw < 0.01f) { outPos[v] = {NAN_VAL, 0, 0}; continue; }
+        float totalWeight = 0.f, mw = 0.f;
+        for (int j = 0; j < 4; ++j) {
+            const float w = vt.weights[j];
+            if (!std::isfinite(w) || w < 0.f) {
+                totalWeight = std::numeric_limits<float>::quiet_NaN();
+                break;
+            }
+            if (w <= 1e-6f) continue;
+            totalWeight += w;
+            if (mapped[vt.bones[j]]) mw += w;
+        }
+        if (!std::isfinite(totalWeight) || !std::isfinite(mw) ||
+            mw < 0.01f || totalWeight - mw > 0.01f) {
+            outPos[v] = {NAN_VAL, 0, 0};
+            continue;
+        }
 
         float wx = 0, wy = 0, wz = 0;
         for (int j = 0; j < 4; ++j) {
@@ -234,6 +281,10 @@ inline void Skin(const Mesh& mesh,
         const float px = wx * inv;
         const float py = wy * inv;
         const float pz = wz * inv;
+        if (!std::isfinite(px) || !std::isfinite(py) || !std::isfinite(pz)) {
+            outPos[v] = {NAN_VAL, 0, 0};
+            continue;
+        }
         if (checkSpikes) {
             const float dx = px - rootX;
             const float dy = py - rootY;
@@ -247,6 +298,66 @@ inline void Skin(const Mesh& mesh,
     }
 }
 
+struct SkinCoverage {
+    std::size_t valid = 0;
+    std::size_t total = 0;
+    std::size_t validByHeight[3]{};
+    std::size_t totalByHeight[3]{};
+
+    bool CompleteEnough() const {
+        if (total == 0 || valid * 100 < total * 93) return false;
+        for (int i = 0; i < 3; ++i) {
+            if (totalByHeight[i] >= 20 &&
+                validByHeight[i] * 100 < totalByHeight[i] * 85)
+                return false;
+        }
+        return true;
+    }
+};
+
+inline SkinCoverage MeasureCoverage(const Mesh& mesh, const Vector3* worldPos)
+{
+    SkinCoverage coverage{};
+    if (!worldPos || mesh.vertices.empty()) return coverage;
+    float low = mesh.vertices[0].y, high = low;
+    if (!std::isfinite(low)) return coverage;
+    for (const auto& v : mesh.vertices) {
+        if (!std::isfinite(v.y)) return {};
+        low = (std::min)(low, v.y);
+        high = (std::max)(high, v.y);
+    }
+    const float range = high - low;
+    const float invRange = std::isfinite(range) && range > 1e-4f
+        ? 3.f / range : 0.f;
+    for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+        const std::uint16_t ia = mesh.indices[t];
+        const std::uint16_t ib = mesh.indices[t + 1];
+        const std::uint16_t ic = mesh.indices[t + 2];
+        if (ia >= mesh.vertices.size() || ib >= mesh.vertices.size() ||
+            ic >= mesh.vertices.size())
+            return {};
+        const float centerY = (mesh.vertices[ia].y +
+                               mesh.vertices[ib].y +
+                               mesh.vertices[ic].y) / 3.f;
+        const float scaled = (centerY - low) * invRange;
+        if (!std::isfinite(scaled))
+            return {};
+        const int band = (std::max)(0, (std::min)(2,
+            static_cast<int>((std::max)(0.f, (std::min)(3.f, scaled)))));
+        ++coverage.total;
+        ++coverage.totalByHeight[band];
+        const auto finite = [](const Vector3& p) {
+            return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+        };
+        if (finite(worldPos[ia]) && finite(worldPos[ib]) &&
+            finite(worldPos[ic])) {
+            ++coverage.valid;
+            ++coverage.validByHeight[band];
+        }
+    }
+    return coverage;
+}
+
 // Project skinned vertices to screen space and draw filled triangles.
 // Returns true if anything was drawn.
 inline bool Draw(ImDrawList* dl,
@@ -256,9 +367,15 @@ inline bool Draw(ImDrawList* dl,
                  int screenW, int screenH,
                  ImU32 fillCol)
 {
-    const int nv = (int)mesh.vertices.size();
-    const int ni = (int)mesh.indices.size();
-    if (nv == 0 || ni == 0) return false;
+    if (!dl || !worldPos || screenW <= 0 || screenH <= 0 ||
+        mesh.vertices.empty() || mesh.indices.empty() ||
+        mesh.indices.size() % 3 != 0)
+        return false;
+    const int nv = static_cast<int>(mesh.vertices.size());
+    const int ni = static_cast<int>(mesh.indices.size());
+    for (auto index : mesh.indices)
+        if (index >= mesh.vertices.size())
+            return false;
 
     // Reusable scratch buffers to eliminate per-entity heap allocations during rendering
     thread_local std::vector<ImVec2> s_screen;
@@ -276,16 +393,20 @@ inline bool Draw(ImDrawList* dl,
 
     for (int i = 0; i < nv; ++i) {
         const Vector3& p = worldPos[i];
-        if (std::isnan(p.x)) continue;
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
+            continue;
         const float cw = M[0][3] * p.x + M[1][3] * p.y + M[2][3] * p.z + M[3][3];
-        if (cw < 0.1f) continue;
+        if (!std::isfinite(cw) || cw < 0.1f) continue;
 
         const float cx = M[0][0] * p.x + M[1][0] * p.y + M[2][0] * p.z + M[3][0];
         const float cy = M[0][1] * p.x + M[1][1] * p.y + M[2][1] * p.z + M[3][1];
 
+        if (!std::isfinite(cx) || !std::isfinite(cy)) continue;
         const float invW = 1.0f / cw;
         s_screen[i].x = (1.0f + cx * invW) * halfW;
         s_screen[i].y = (1.0f - cy * invW) * halfH;
+        if (!std::isfinite(s_screen[i].x) || !std::isfinite(s_screen[i].y))
+            continue;
         s_visible[i] = 1;
     }
 

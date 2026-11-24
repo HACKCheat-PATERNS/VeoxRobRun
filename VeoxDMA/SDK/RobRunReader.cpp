@@ -8,6 +8,9 @@ extern void RequestReattach();
 #include "CameraFinder.h"
 #include "CollisionBVH.h"
 #include "ConfigInstance.h"
+#include "RigidMatrixBlend.h"
+#include "PoseFrameSelector.h"
+#include "RigRecoveryPolicy.h"
 #include "DebugLog.h"
 #include "Overlay.h"
 #include <atomic>
@@ -17,6 +20,7 @@ extern void RequestReattach();
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -431,6 +435,8 @@ struct RigCacheEntry {
     // 1-frame pre-LateUpdate / torn-DMA flickers of any amplitude.
     std::vector<Skeleton::BoneSegment> relBoneHist[3];
     Skeleton::BonePoints relPtsHist[3]{};
+    std::vector<Skeleton::Vec> relWorldHist[3];
+    std::vector<Matrix4x4> worldFrameHist[3];
     int poseHistCount = 0;
     int poseHistCursor = 0;
     int upgradeAttempts = 0;
@@ -3843,6 +3849,7 @@ static void UpdateInternal()
             bool needsPose = false;
             std::size_t poseOffset = 0;
             std::size_t poseSize = 0;
+            DWORD poseBytesRead = 0;
         };
 
         // ---------------------------------------------------------------
@@ -4058,9 +4065,12 @@ static void UpdateInternal()
                         w.blockAddress, &w.block, sizeof(TransformBlock));
                     if (w.needsPose) {
                         auto& rig = rigCache[w.entityId];
-                        TargetProcess.AddScatterReadRequest(scatter,
-                            rig.layout.matrices,
-                            poseBuf.data() + w.poseOffset, w.poseSize);
+                        w.poseBytesRead = 0;
+                        VMMDLL_Scatter_PrepareEx(
+                            scatter.handle, rig.layout.matrices,
+                            static_cast<DWORD>(w.poseSize),
+                            reinterpret_cast<PBYTE>(poseBuf.data() + w.poseOffset),
+                            &w.poseBytesRead);
                         ++chunkPoses;
                     }
                     ++chunkEnts;
@@ -4134,7 +4144,10 @@ static void UpdateInternal()
                 rig.points = Skeleton::BonePoints{};
                 rig.prevLocalValid = false;
                 rig.smoothedValid = false;
+                rig.worldMatrices.clear();
                 rig.smoothedWorldMatrices.clear();
+                for (auto& history : rig.relWorldHist) history.clear();
+                for (auto& history : rig.worldFrameHist) history.clear();
                 rig.lastSampledPos = Vector3{};
                 rig.lastMotionTick = 0;
                 rig.animatorActive = true;
@@ -4183,12 +4196,10 @@ static void UpdateInternal()
                 return ok;
             };
 
-            const bool incomplete = rig.layoutValid && layoutMissingLimbs(rig.layout) &&
-                rig.upgradeAttempts < 4;
-            const std::uint64_t upgradeIntervalMs =
-                (rig.upgradeAttempts == 0) ? 500 :
-                (rig.upgradeAttempts == 1) ? 1500 : 4000;
-            const std::uint64_t checkIntervalMs = incomplete ? upgradeIntervalMs : 1500;
+            const bool incomplete = rig.layoutValid && layoutMissingLimbs(rig.layout);
+            const std::uint64_t checkIntervalMs = incomplete
+                ? RigRecoveryPolicy::RetryIntervalMs(rig.upgradeAttempts)
+                : 1500;
             if (rig.layoutValid && now - rig.layoutStamp >= checkIntervalMs) {
                 if (viewPtr <= 0x10000 ||
                     !Skeleton::ValidateHierarchy(rig.layout, DmaRead)) {
@@ -4200,7 +4211,7 @@ static void UpdateInternal()
                     rig.layoutStamp = now;
                     --rebuildBudget;
                     ++passRebuilds;
-                    ++rig.upgradeAttempts;
+                    rig.upgradeAttempts = RigRecoveryPolicy::IncrementAttempt(rig.upgradeAttempts);
                     // Silently try upgrading an incomplete layout using cached
                     // DMA (bone name lookup inside uses 3 fast scatter calls).
                     Skeleton::RigLayout candidate;
@@ -4235,6 +4246,8 @@ static void UpdateInternal()
                 if (ok) {
                     rig.layout = std::move(candidate);
                     rig.layoutValid = true;
+                    rig.worldMatrices.clear();
+                    rig.smoothedWorldMatrices.clear();
                     rig.poseFailures = 0;
                     rig.poseFailureSince = 0;
                     rig.smoothedValid = false;
@@ -4248,6 +4261,7 @@ static void UpdateInternal()
                         rig.bones.clear();
                         rig.points = Skeleton::BonePoints{};
                         rig.smoothedValid = false;
+                        rig.worldMatrices.clear();
                         rig.smoothedWorldMatrices.clear();
                         rig.poseHistCount = 0;
                         rig.poseHistCursor = 0;
@@ -4272,10 +4286,13 @@ static void UpdateInternal()
             if (scatter.handle) {
                 for (auto idx : lateResolve) {
                     auto& rig = rigCache[work[idx].entityId];
-                    TargetProcess.AddScatterReadRequest(scatter,
-                        rig.layout.matrices,
-                        poseBuf.data() + work[idx].poseOffset,
-                        work[idx].poseSize);
+                    auto& w = work[idx];
+                    w.poseBytesRead = 0;
+                    VMMDLL_Scatter_PrepareEx(
+                        scatter.handle, rig.layout.matrices,
+                        static_cast<DWORD>(w.poseSize),
+                        reinterpret_cast<PBYTE>(poseBuf.data() + w.poseOffset),
+                        &w.poseBytesRead);
                 }
                 TargetProcess.ExecuteReadScatter(scatter);
             }
@@ -4834,10 +4851,13 @@ static void UpdateInternal()
                     tmpWorld.resize(static_cast<std::size_t>(rig.layout.count));
 
                 Skeleton::PoseStats pst{};
-                bool sampled = Skeleton::ProcessPoseData(rig.layout,
-                    poseBuf.data() + w.poseOffset, w.poseSize,
-                    tmpBones, &tmpPoints, tmpLocal.data(),
-                    needChamsMatrices ? tmpWorld.data() : nullptr, &pst);
+                const bool poseFullyRead = w.poseSize > 0 &&
+                    w.poseSize == static_cast<std::size_t>(w.poseBytesRead);
+                bool sampled = poseFullyRead &&
+                    Skeleton::ProcessPoseData(rig.layout,
+                        poseBuf.data() + w.poseOffset, w.poseSize,
+                        tmpBones, &tmpPoints, tmpLocal.data(),
+                        needChamsMatrices ? tmpWorld.data() : nullptr, &pst);
 
                 if (sampled) {
                     ++poseScatterOkAcc;
@@ -4871,8 +4891,9 @@ static void UpdateInternal()
                     const float hdx = tmpPoints.head.x - tmpPoints.pelvis.x;
                     const float hdy = tmpPoints.head.y - tmpPoints.pelvis.y;
                     const float hdz = tmpPoints.head.z - tmpPoints.pelvis.z;
-                    if (hdx * hdx + hdy * hdy + hdz * hdz > 1.25f * 1.25f)
+                    if (hdx * hdx + hdy * hdy + hdz * hdz > 1.25f * 1.25f) {
                         sampled = false;
+                    }
                 }
 
                 if (!sampled) {
@@ -4892,6 +4913,7 @@ static void UpdateInternal()
                         rig.bones.clear();
                         rig.points = Skeleton::BonePoints{};
                         rig.smoothedValid = false;
+                        rig.worldMatrices.clear();
                         rig.smoothedWorldMatrices.clear();
                         rig.poseHistCount = 0;
                         rig.poseHistCursor = 0;
@@ -4975,7 +4997,10 @@ static void UpdateInternal()
                     }
 
                     if (rig.poseHistCount > 0 &&
-                        rig.relBoneHist[(rig.poseHistCursor + 2) % 3].size() != tmpBones.size())
+                        (rig.relBoneHist[(rig.poseHistCursor + 2) % 3].size() != tmpBones.size() ||
+                         (needChamsMatrices &&
+                          (rig.relWorldHist[(rig.poseHistCursor + 2) % 3].size() != tmpWorld.size() ||
+                           rig.worldFrameHist[(rig.poseHistCursor + 2) % 3].size() != tmpWorld.size()))))
                     {
                         rig.poseHistCount = 0;
                         rig.poseHistCursor = 0;
@@ -5011,46 +5036,83 @@ static void UpdateInternal()
                     relPts.rightKnee     = subVec(tmpPoints.rightKnee);
                     relPts.rightFoot     = subVec(tmpPoints.rightFoot);
 
+                    auto& relWorld = rig.relWorldHist[slot];
+                    if (needChamsMatrices) {
+                        rig.worldFrameHist[slot] = tmpWorld;
+                        relWorld.resize(tmpWorld.size());
+                        for (std::size_t i = 0; i < tmpWorld.size(); ++i) {
+                            const auto& m = tmpWorld[i].matrix;
+                            if (!std::isfinite(m[3][3]) || std::abs(m[3][3] - 1.f) > 1e-4f ||
+                                !std::isfinite(m[3][0]) || !std::isfinite(m[3][1]) ||
+                                !std::isfinite(m[3][2])) {
+                                const float nan = std::numeric_limits<float>::quiet_NaN();
+                                relWorld[i] = {nan, nan, nan};
+                                continue;
+                            }
+                            relWorld[i] = {
+                                m[3][0] - rawAnchor.x,
+                                m[3][1] - rawAnchor.y,
+                                m[3][2] - rawAnchor.z
+                            };
+                        }
+                    } else {
+                        relWorld.clear();
+                        rig.worldFrameHist[slot].clear();
+                    }
+
                     rig.poseHistCursor = (slot + 1) % 3;
                     if (rig.poseHistCount < 3) ++rig.poseHistCount;
 
                     if (rig.poseHistCount == 3) {
-                        auto med3f = [](float a, float b, float c) -> float {
-                            return (std::max)((std::min)(a, b), (std::min)((std::max)(a, b), c));
+                        const int chosen = PoseFrameSelector::SelectCoherentFrame(
+                            rig.relBoneHist, slot);
+                        auto restore = [&](const Skeleton::Vec& relative) -> Skeleton::Vec {
+                            return {anchor.x + relative.x,
+                                    anchor.y + relative.y,
+                                    anchor.z + relative.z};
                         };
-                        auto med3v = [&](const Skeleton::Vec& v0, const Skeleton::Vec& v1, const Skeleton::Vec& v2) -> Skeleton::Vec {
-                            return {
-                                anchor.x + med3f(v0.x, v1.x, v2.x),
-                                anchor.y + med3f(v0.y, v1.y, v2.y),
-                                anchor.z + med3f(v0.z, v1.z, v2.z)
-                            };
-                        };
-                        const auto& h0 = rig.relBoneHist[0];
-                        const auto& h1 = rig.relBoneHist[1];
-                        const auto& h2 = rig.relBoneHist[2];
+                        const auto& selectedBones = rig.relBoneHist[chosen];
                         for (std::size_t i = 0; i < tmpBones.size(); ++i) {
-                            tmpBones[i].a = med3v(h0[i].a, h1[i].a, h2[i].a);
-                            tmpBones[i].b = med3v(h0[i].b, h1[i].b, h2[i].b);
+                            tmpBones[i].a = restore(selectedBones[i].a);
+                            tmpBones[i].b = restore(selectedBones[i].b);
                         }
-                        const auto& p0 = rig.relPtsHist[0];
-                        const auto& p1 = rig.relPtsHist[1];
-                        const auto& p2 = rig.relPtsHist[2];
-                        tmpPoints.head          = med3v(p0.head, p1.head, p2.head);
-                        tmpPoints.neck          = med3v(p0.neck, p1.neck, p2.neck);
-                        tmpPoints.chest         = med3v(p0.chest, p1.chest, p2.chest);
-                        tmpPoints.pelvis        = med3v(p0.pelvis, p1.pelvis, p2.pelvis);
-                        tmpPoints.leftShoulder  = med3v(p0.leftShoulder, p1.leftShoulder, p2.leftShoulder);
-                        tmpPoints.leftElbow     = med3v(p0.leftElbow, p1.leftElbow, p2.leftElbow);
-                        tmpPoints.leftHand      = med3v(p0.leftHand, p1.leftHand, p2.leftHand);
-                        tmpPoints.rightShoulder = med3v(p0.rightShoulder, p1.rightShoulder, p2.rightShoulder);
-                        tmpPoints.rightElbow    = med3v(p0.rightElbow, p1.rightElbow, p2.rightElbow);
-                        tmpPoints.rightHand     = med3v(p0.rightHand, p1.rightHand, p2.rightHand);
-                        tmpPoints.leftHip       = med3v(p0.leftHip, p1.leftHip, p2.leftHip);
-                        tmpPoints.leftKnee      = med3v(p0.leftKnee, p1.leftKnee, p2.leftKnee);
-                        tmpPoints.leftFoot      = med3v(p0.leftFoot, p1.leftFoot, p2.leftFoot);
-                        tmpPoints.rightHip      = med3v(p0.rightHip, p1.rightHip, p2.rightHip);
-                        tmpPoints.rightKnee     = med3v(p0.rightKnee, p1.rightKnee, p2.rightKnee);
-                        tmpPoints.rightFoot     = med3v(p0.rightFoot, p1.rightFoot, p2.rightFoot);
+                        const auto& selectedPoints = rig.relPtsHist[chosen];
+                        tmpPoints = selectedPoints;
+                        tmpPoints.head = restore(selectedPoints.head);
+                        tmpPoints.neck = restore(selectedPoints.neck);
+                        tmpPoints.chest = restore(selectedPoints.chest);
+                        tmpPoints.pelvis = restore(selectedPoints.pelvis);
+                        tmpPoints.leftShoulder = restore(selectedPoints.leftShoulder);
+                        tmpPoints.leftElbow = restore(selectedPoints.leftElbow);
+                        tmpPoints.leftHand = restore(selectedPoints.leftHand);
+                        tmpPoints.rightShoulder = restore(selectedPoints.rightShoulder);
+                        tmpPoints.rightElbow = restore(selectedPoints.rightElbow);
+                        tmpPoints.rightHand = restore(selectedPoints.rightHand);
+                        tmpPoints.leftHip = restore(selectedPoints.leftHip);
+                        tmpPoints.leftKnee = restore(selectedPoints.leftKnee);
+                        tmpPoints.leftFoot = restore(selectedPoints.leftFoot);
+                        tmpPoints.rightHip = restore(selectedPoints.rightHip);
+                        tmpPoints.rightKnee = restore(selectedPoints.rightKnee);
+                        tmpPoints.rightFoot = restore(selectedPoints.rightFoot);
+
+                        if (needChamsMatrices &&
+                            rig.relWorldHist[chosen].size() == tmpWorld.size() &&
+                            rig.worldFrameHist[chosen].size() == tmpWorld.size()) {
+                            tmpWorld = rig.worldFrameHist[chosen];
+                            for (std::size_t i = 0; i < tmpWorld.size(); ++i) {
+                                auto& m = tmpWorld[i].matrix;
+                                const auto& rel = rig.relWorldHist[chosen][i];
+                                if (!std::isfinite(m[3][3]) ||
+                                    std::abs(m[3][3] - 1.f) > 1e-4f ||
+                                    !std::isfinite(rel.x) ||
+                                    !std::isfinite(rel.y) ||
+                                    !std::isfinite(rel.z))
+                                    continue;
+                                m[3][0] = anchor.x + rel.x;
+                                m[3][1] = anchor.y + rel.y;
+                                m[3][2] = anchor.z + rel.z;
+                            }
+                        }
                     }
 
                     // Commit every pass so world position stays at full worker rate.
@@ -5117,8 +5179,30 @@ static void UpdateInternal()
                     // so snap directly without adding PoseSmoothing lag/toggle chatter.
                     const float moveDist = Distance(rig.lastSampledPos, entity.position);
                     rig.lastSampledPos = entity.position;
-                    const bool snapPose = entity.inVehicle || (moveDist > 0.40f);
+                    bool snapPose = !std::isfinite(moveDist) || entity.inVehicle || (moveDist > 0.40f);
                     const float maxDeltaSq = 0.25f;
+                    if (!snapPose && ConfigInstance.Player.PoseSmoothing &&
+                        rig.smoothedValid && rig.smoothedBones.size() == rig.bones.size()) {
+                        snapPose = PoseFrameSelector::HasLargeJointDelta(
+                            rig.smoothedBones, rig.bones, maxDeltaSq);
+                        if (!snapPose && needChamsMatrices &&
+                            rig.smoothedWorldMatrices.size() == rig.worldMatrices.size()) {
+                            for (std::size_t i = 0; i < rig.worldMatrices.size(); ++i) {
+                                const auto& cur = rig.worldMatrices[i].matrix;
+                                const auto& old = rig.smoothedWorldMatrices[i].matrix;
+                                if (std::abs(cur[3][3] - 1.f) > 1e-4f ||
+                                    std::abs(old[3][3] - 1.f) > 1e-4f)
+                                    continue;
+                                const float dx = cur[3][0] - old[3][0];
+                                const float dy = cur[3][1] - old[3][1];
+                                const float dz = cur[3][2] - old[3][2];
+                                if (dx*dx + dy*dy + dz*dz > maxDeltaSq) {
+                                    snapPose = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
 
                     // Exponential smoothing on the worker. PoseSmoothAlpha is
                     // the base weight of the new sample: 1 publishes the raw pose,
@@ -5127,21 +5211,15 @@ static void UpdateInternal()
                     if (!snapPose && ConfigInstance.Player.PoseSmoothing && rig.smoothedValid &&
                         rig.smoothedBones.size() == rig.bones.size() &&
                         (rig.worldMatrices.empty() || rig.smoothedWorldMatrices.size() == rig.worldMatrices.size())) {
-                        const float baseAlpha = std::clamp(ConfigInstance.Player.PoseSmoothAlpha, 0.10f, 1.0f);
+                        const float requestedAlpha = ConfigInstance.Player.PoseSmoothAlpha;
+                        const float baseAlpha = std::clamp(
+                            std::isfinite(requestedAlpha) ? requestedAlpha : 0.4f,
+                            0.10f, 1.0f);
                         const float alpha = std::clamp(baseAlpha + (moveDist / 0.15f) * (1.0f - baseAlpha), 0.15f, 1.0f);
                         const float inv = 1.0f - alpha;
                         for (std::size_t i = 0; i < rig.bones.size(); ++i) {
                             auto& s = rig.smoothedBones[i];
                             const auto& r = rig.bones[i];
-                            const float dax = r.a.x-s.a.x, day = r.a.y-s.a.y, daz = r.a.z-s.a.z;
-                            const float dbx = r.b.x-s.b.x, dby = r.b.y-s.b.y, dbz = r.b.z-s.b.z;
-                            if (dax*dax+day*day+daz*daz > maxDeltaSq ||
-                                dbx*dbx+dby*dby+dbz*dbz > maxDeltaSq) {
-                                s.a = r.a;
-                                s.b = r.b;
-                                s.visible = r.visible;
-                                continue;
-                            }
                             s.a.x = s.a.x * inv + r.a.x * alpha;
                             s.a.y = s.a.y * inv + r.a.y * alpha;
                             s.a.z = s.a.z * inv + r.a.z * alpha;
@@ -5151,11 +5229,6 @@ static void UpdateInternal()
                             s.visible = r.visible;
                         }
                         auto lerpVec = [&](Skeleton::Vec& dst, const Skeleton::Vec& src) {
-                            const float dx = src.x-dst.x, dy = src.y-dst.y, dz = src.z-dst.z;
-                            if (dx*dx+dy*dy+dz*dz > 0.25f) {
-                                dst = src;
-                                return;
-                            }
                             dst.x = dst.x * inv + src.x * alpha;
                             dst.y = dst.y * inv + src.y * alpha;
                             dst.z = dst.z * inv + src.z * alpha;
@@ -5186,18 +5259,15 @@ static void UpdateInternal()
                             for (std::size_t i = 0; i < rig.worldMatrices.size(); ++i) {
                                 auto& sm = rig.smoothedWorldMatrices[i];
                                 const auto& rm = rig.worldMatrices[i];
-                                const float dx = rm.matrix[3][0]-sm.matrix[3][0];
-                                const float dy = rm.matrix[3][1]-sm.matrix[3][1];
-                                const float dz = rm.matrix[3][2]-sm.matrix[3][2];
-                                if (dx*dx+dy*dy+dz*dz > 0.25f) {
+                                const bool currentValid = std::isfinite(rm.matrix[3][3]) &&
+                                    std::abs(rm.matrix[3][3] - 1.f) < 1e-4f;
+                                const bool previousValid = std::isfinite(sm.matrix[3][3]) &&
+                                    std::abs(sm.matrix[3][3] - 1.f) < 1e-4f;
+                                if (!currentValid || !previousValid) {
                                     sm = rm;
                                     continue;
                                 }
-                                for (int r = 0; r < 4; ++r) {
-                                    for (int c = 0; c < 4; ++c) {
-                                        sm.matrix[r][c] = sm.matrix[r][c] * inv + rm.matrix[r][c] * alpha;
-                                    }
-                                }
+                                sm = RigidMatrixBlend::Blend(sm, rm, alpha);
                             }
                         }
                     } else {

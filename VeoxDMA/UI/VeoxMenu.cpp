@@ -314,8 +314,8 @@ constexpr SearchEntry kSearchIndex[] = {
 	{ "Money & Value HUD", 1, 0 },
 	// Visuals -> Skeleton & VisCheck
 	{ "Draw Skeleton", 1, 1 }, { "Bone Thickness", 1, 1 }, { "Head Circle", 1, 1 },
-	{ "Character Chams", 1, 1 }, { "Fill Opacity", 1, 1 }, { "Limb Thickness", 1, 1 },
-	{ "Chams Outline", 1, 1 }, { "Chams VisCheck", 1, 1 }, { "Enable VisCheck", 1, 1 },
+	{ "Character Chams", 1, 1 }, { "Fill Opacity", 1, 1 },
+	{ "Chams VisCheck", 1, 1 }, { "Enable VisCheck", 1, 1 },
 	{ "Enable WallCheck", 1, 1 }, { "Reload BVH", 1, 1 }, { "Show BVH", 1, 1 },
 	{ "BVH Draw Dist", 1, 1 }, { "Vis Ray Count", 1, 1 }, { "Vis Max Dist", 1, 1 },
 	{ "Hidden Alpha", 1, 1 }, { "Car Cabin Solid", 1, 1 }, { "Vis Ring", 1, 1 }, { "Status Ring", 1, 1 },
@@ -2095,13 +2095,11 @@ void DrawVisualsSkeleton()
 		SliderFloatRow("Bone Thickness", &ConfigInstance.Player.SkeletonThickness, 0.5f, 6.0f, " px");
 		ToggleRow("Head Circle", &ConfigInstance.Player.HeadCircle);
 
-		SectionLabel("3D Capsule Chams");
+		SectionLabel("Character Chams");
 		ColorToggleRow("Character Chams", &ConfigInstance.Player.Chams, ConfigInstance.Player.ChamsColour);
 		if (ConfigInstance.Player.Chams)
 		{
 			SliderFloatRow("Fill Opacity", &ConfigInstance.Player.ChamsAlpha, 0.1f, 1.0f);
-			SliderFloatRow("Limb Thickness", &ConfigInstance.Player.ChamsScale, 0.5f, 2.0f, "x");
-			ColorToggleRow("Chams Outline", &ConfigInstance.Player.ChamsOutline, ConfigInstance.Player.ChamsOutlineColour);
 			ToggleRow("Chams VisCheck", &ConfigInstance.Player.ChamsVisCheck);
 			if (ConfigInstance.Player.ChamsVisCheck)
 			{
@@ -2111,7 +2109,7 @@ void DrawVisualsSkeleton()
 		}
 		else
 		{
-			Note("Read-only DMA overlay silhouette over character limbs.");
+			Note("Mesh Chams requires complete skinning data; no capsule fallback.");
 		}
 		EndCard();
 	}

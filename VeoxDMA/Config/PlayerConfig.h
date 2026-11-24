@@ -82,16 +82,12 @@ public:
 	bool PoseSmoothing = true;
 	float PoseSmoothAlpha = 0.4f;
 
-	// Character 3D Capsule Chams (100% read-only DMA overlay silhouette)
 	bool Chams = false;
 	D2D1::ColorF ChamsColour = Colour(140, 90, 255);
 	float ChamsAlpha = 0.45f;
 	bool ChamsVisCheck = true;
 	D2D1::ColorF ChamsVisibleColour = Colour(255, 65, 65);
 	D2D1::ColorF ChamsHiddenColour = Colour(120, 80, 255);
-	bool ChamsOutline = false;
-	D2D1::ColorF ChamsOutlineColour = Colour(200, 180, 255);
-	float ChamsScale = 1.0f;
 	bool Skeleton = true;
 	float SkeletonThickness = 2.0f;
 	bool HeadCircle = true;
@@ -186,9 +182,6 @@ public:
         j[ConfigName][LIT("ChamsVisCheck")] = ChamsVisCheck;
         ToJsonColour(&j, LIT("ChamsVisibleColour"), &ChamsVisibleColour);
         ToJsonColour(&j, LIT("ChamsHiddenColour"), &ChamsHiddenColour);
-        j[ConfigName][LIT("ChamsOutline")] = ChamsOutline;
-        ToJsonColour(&j, LIT("ChamsOutlineColour"), &ChamsOutlineColour);
-        j[ConfigName][LIT("ChamsScale")] = ChamsScale;
         j[ConfigName][LIT("Skeleton")] = Skeleton;
         j[ConfigName][LIT("SkeletonThickness")] = SkeletonThickness;
         j[ConfigName][LIT("HeadCircle")] = HeadCircle;
@@ -270,9 +263,6 @@ public:
         ChamsVisCheck = j[ConfigName].value(LIT("ChamsVisCheck"), ChamsVisCheck);
         FromJsonColour(j, LIT("ChamsVisibleColour"), &ChamsVisibleColour);
         FromJsonColour(j, LIT("ChamsHiddenColour"), &ChamsHiddenColour);
-        ChamsOutline = j[ConfigName].value(LIT("ChamsOutline"), ChamsOutline);
-        FromJsonColour(j, LIT("ChamsOutlineColour"), &ChamsOutlineColour);
-        ChamsScale = j[ConfigName].value(LIT("ChamsScale"), ChamsScale);
         Skeleton = j[ConfigName].value(LIT("Skeleton"), Skeleton);
         SkeletonThickness = j[ConfigName].value(LIT("SkeletonThickness"), SkeletonThickness);
         HeadCircle = j[ConfigName].value(LIT("HeadCircle"), HeadCircle);
