@@ -154,10 +154,8 @@ static bool TryLoadHierarchyFromTransform(Snapshot& m, U nativeTransform, bool w
     const U parents = m.ptr(hierarchy, 0x20);
     const U pointers = m.ptr(hierarchy, 0x30);
     std::int32_t count = 0;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048) {
-        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 2048)
-            return false;
-    }
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048)
+        return false;
 
     std::vector<TRS> local(static_cast<std::size_t>(count));
     std::vector<std::int32_t> parent(static_cast<std::size_t>(count));
@@ -1279,7 +1277,6 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
             auto& mat = worldMatricesOut[b];
             if (!worldValid[b]) {
                 std::memset(&mat, 0, sizeof(Matrix4x4));
-                mat.matrix[0][0] = mat.matrix[1][1] = mat.matrix[2][2] = mat.matrix[3][3] = 1.0f;
                 continue;
             }
             const auto& q = worldRot[b];
@@ -1674,10 +1671,8 @@ bool ResolveRigTarget(U view, const Read& read, RigTarget& out)
     U matrices = m.ptr(hierarchy, 0x18);
     std::int32_t count = 0;
     if (matrices <= 0x10000) return false;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048) {
-        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 2048)
-            return false;
-    }
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048)
+        return false;
 
     out.view = view;
     out.movementView = movement;
@@ -1714,10 +1709,8 @@ bool RootWorldPosition(U view, const Read& read, Vec& out)
     U parents = m.ptr(hierarchy, 0x20);
     std::int32_t count = 0;
     if (matrices <= 0x10000 || parents <= 0x10000) return false;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048) {
-        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 2048)
-            return false;
-    }
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048)
+        return false;
 
     // The root is the only node without a parent, so its local TRS is already
     // the world transform. Everything below it is composed by SampleLayout.
