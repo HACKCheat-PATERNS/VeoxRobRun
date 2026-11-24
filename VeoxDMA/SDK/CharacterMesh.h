@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <windows.h>
 #include "Matrix4x4.h"
+#include "ChamsBoneBinding.h"
 #include "DebugLog.h"
 
 namespace CharacterMesh {
@@ -152,7 +153,6 @@ inline bool Load(const std::string& path, Mesh& mesh)
 // boneWorld:  array of world-space 4x4 matrices, one per skeleton bone
 //             (column-major: matrix[col][row], matching Matrix4x4).
 // boneMap:    meshBoneIndex → skeletonBoneIndex (size = mesh.numBones).
-//             -1 means unmapped (identity fallback).
 // outPos:     output world positions (size = mesh.vertices.size()).
 inline void Skin(const Mesh& mesh,
                  const Matrix4x4* boneWorld, int skeletonBoneCount,
@@ -173,12 +173,25 @@ inline void Skin(const Mesh& mesh,
     std::uint8_t* mapped = s_mapped.data();
     std::memset(mapped, 0, mesh.numBones);
     for (std::uint32_t b = 0; b < mesh.numBones; ++b) {
-        int skel = boneMap ? boneMap[b] : -1;
+        const auto binding = ChamsBoneBinding::Resolve(b, mesh.numBones, boneMap);
+        const int skel = binding.skeletonBone;
         if (skel < 0 || skel >= skeletonBoneCount) {
             std::memset(&skin[b], 0, sizeof(Matrix4x4));
             continue;
         }
-        skin[b] = mesh.bindPoses[b] * boneWorld[skel];
+        const auto& world = boneWorld[skel].matrix;
+        bool validWorld = std::abs(world[3][3] - 1.0f) < 1e-4f;
+        for (int c = 0; c < 4 && validWorld; ++c)
+            for (int row = 0; row < 4; ++row)
+                if (!std::isfinite(world[c][row])) {
+                    validWorld = false;
+                    break;
+                }
+        if (!validWorld) {
+            std::memset(&skin[b], 0, sizeof(Matrix4x4));
+            continue;
+        }
+        skin[b] = mesh.bindPoses[binding.bindPoseBone] * boneWorld[skel];
         mapped[b] = 1;
     }
     // reject mis-mapped bones whose skin matrix drifts far from the pack
@@ -215,11 +228,17 @@ inline void Skin(const Mesh& mesh,
 
     for (std::size_t v = 0; v < mesh.vertices.size(); ++v) {
         const Vertex& vt = mesh.vertices[v];
-        float mw = 0;
-        for (int j = 0; j < 4; ++j)
-            if (vt.weights[j] > 1e-6f && mapped[vt.bones[j]])
-                mw += vt.weights[j];
-        if (mw < 0.01f) { outPos[v] = {NAN_VAL, 0, 0}; continue; }
+        float totalWeight = 0.f, mw = 0.f;
+        for (int j = 0; j < 4; ++j) {
+            const float w = vt.weights[j];
+            if (w <= 1e-6f) continue;
+            totalWeight += w;
+            if (mapped[vt.bones[j]]) mw += w;
+        }
+        if (mw < 0.01f || totalWeight - mw > 0.01f) {
+            outPos[v] = {NAN_VAL, 0, 0};
+            continue;
+        }
 
         float wx = 0, wy = 0, wz = 0;
         for (int j = 0; j < 4; ++j) {
@@ -245,6 +264,56 @@ inline void Skin(const Mesh& mesh,
         }
         outPos[v] = { px, py, pz };
     }
+}
+
+struct SkinCoverage {
+    std::size_t valid = 0;
+    std::size_t total = 0;
+    std::size_t validByHeight[3]{};
+    std::size_t totalByHeight[3]{};
+
+    bool CompleteEnough() const {
+        if (total == 0 || valid * 100 < total * 93) return false;
+        for (int i = 0; i < 3; ++i) {
+            if (totalByHeight[i] >= 20 &&
+                validByHeight[i] * 100 < totalByHeight[i] * 85)
+                return false;
+        }
+        return true;
+    }
+};
+
+inline SkinCoverage MeasureCoverage(const Mesh& mesh, const Vector3* worldPos)
+{
+    SkinCoverage coverage{};
+    if (!worldPos || mesh.vertices.empty()) return coverage;
+    float low = mesh.vertices[0].y, high = low;
+    for (const auto& v : mesh.vertices) {
+        low = (std::min)(low, v.y);
+        high = (std::max)(high, v.y);
+    }
+    const float invRange = (high - low > 1e-4f) ? (3.f / (high - low)) : 0.f;
+    for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+        const std::uint16_t ia = mesh.indices[t];
+        const std::uint16_t ib = mesh.indices[t + 1];
+        const std::uint16_t ic = mesh.indices[t + 2];
+        const float centerY = (mesh.vertices[ia].y +
+                               mesh.vertices[ib].y +
+                               mesh.vertices[ic].y) / 3.f;
+        const int band = (std::max)(0, (std::min)(2,
+            static_cast<int>((centerY - low) * invRange)));
+        ++coverage.total;
+        ++coverage.totalByHeight[band];
+        const auto finite = [](const Vector3& p) {
+            return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+        };
+        if (finite(worldPos[ia]) && finite(worldPos[ib]) &&
+            finite(worldPos[ic])) {
+            ++coverage.valid;
+            ++coverage.validByHeight[band];
+        }
+    }
+    return coverage;
 }
 
 // Project skinned vertices to screen space and draw filled triangles.
