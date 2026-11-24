@@ -154,10 +154,8 @@ static bool TryLoadHierarchyFromTransform(Snapshot& m, U nativeTransform, bool w
     const U parents = m.ptr(hierarchy, 0x20);
     const U pointers = m.ptr(hierarchy, 0x30);
     std::int32_t count = 0;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048) {
-        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 2048)
-            return false;
-    }
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048)
+        return false;
 
     std::vector<TRS> local(static_cast<std::size_t>(count));
     std::vector<std::int32_t> parent(static_cast<std::size_t>(count));
@@ -223,26 +221,33 @@ static bool ResolveViewHierarchy(Snapshot& m, U view, ResolvedHierarchy& out)
     };
 
     // Priority 1: Direct HeadPosition at +0xE8 (3-hop fast path)
-    if (tryManagedTransform(m.ptr(view, 0xE8), true))
+    if (tryManagedTransform(m.ptr(view, 0xE8), true)) {
         return true;
+    }
 
     // Priority 2: CharacterMovementView._transform (+0x20 -> +0x20)
     const U movement = m.ptr(view, 0x20);
-    if (movement > 0x10000 && tryManagedTransform(m.ptr(movement, 0x20), true))
+    if (movement > 0x10000 && tryManagedTransform(m.ptr(movement, 0x20), true)) {
         return true;
+    }
 
     // Priority 3: Animation views
     const U animation = m.ptr(view, 0x28);
     if (animation > 0x10000) {
         const U torso = m.ptr(animation, 0x30);
-        if (torso > 0x10000 && tryManagedTransform(m.ptr(torso, 0x20), true))
+        if (torso > 0x10000 && tryManagedTransform(m.ptr(torso, 0x20), true)) {
             return true;
+        }
         const U head = m.ptr(animation, 0x28);
-        if (head > 0x10000 && tryManagedTransform(m.ptr(head, 0x20), true))
+        if (head > 0x10000 && tryManagedTransform(m.ptr(head, 0x20), true)) {
             return true;
+        }
     }
 
-    return TryLoadHierarchyFromTransform(m, m.ptr(view, 0x10), false, out);
+    if (TryLoadHierarchyFromTransform(m, m.ptr(view, 0x10), false, out)) {
+        return true;
+    }
+    return false;
 }
 
 static const int kDefaultBoneMapMan[94] = {
@@ -1128,7 +1133,6 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     if (!m.stable() ||
         m.ptr(native, 0x28) != hierarchy || m.ptr(hierarchy, 0x18) != matrices)
         return false;
-
     out.matrices = matrices;
     out.nativeTransform = native;
     out.hierarchy = hierarchy;
@@ -1279,7 +1283,6 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
             auto& mat = worldMatricesOut[b];
             if (!worldValid[b]) {
                 std::memset(&mat, 0, sizeof(Matrix4x4));
-                mat.matrix[0][0] = mat.matrix[1][1] = mat.matrix[2][2] = mat.matrix[3][3] = 1.0f;
                 continue;
             }
             const auto& q = worldRot[b];
@@ -1600,7 +1603,6 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
             if (p == lca) break;
         }
     }
-
     out.matrices = matrices;
     out.nativeTransform = native;
     out.hierarchy = hierarchy;
@@ -1674,10 +1676,8 @@ bool ResolveRigTarget(U view, const Read& read, RigTarget& out)
     U matrices = m.ptr(hierarchy, 0x18);
     std::int32_t count = 0;
     if (matrices <= 0x10000) return false;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048) {
-        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 2048)
-            return false;
-    }
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048)
+        return false;
 
     out.view = view;
     out.movementView = movement;
@@ -1714,10 +1714,8 @@ bool RootWorldPosition(U view, const Read& read, Vec& out)
     U parents = m.ptr(hierarchy, 0x20);
     std::int32_t count = 0;
     if (matrices <= 0x10000 || parents <= 0x10000) return false;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048) {
-        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 2048)
-            return false;
-    }
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048)
+        return false;
 
     // The root is the only node without a parent, so its local TRS is already
     // the world transform. Everything below it is composed by SampleLayout.
